@@ -189,20 +189,44 @@ class GoogleSheetsLogger:
     def _connect(self):
         """Conecta ao Google Sheets usando as credenciais"""
         try:
-            if not os.path.exists(self.credentials_file):
-                log(f"⚠️ Arquivo de credenciais {self.credentials_file} não encontrado", "WARN")
-                return
-            
-            # Configurar credenciais
+            # Configurar credenciais - Prioridade: base64 > arquivo local
             scopes = [
                 'https://www.googleapis.com/auth/spreadsheets',
                 'https://www.googleapis.com/auth/drive'
             ]
             
-            creds = Credentials.from_service_account_file(
-                self.credentials_file,
-                scopes=scopes
-            )
+            # Tentar ler de variável de ambiente (base64) - PRODUÇÃO
+            google_creds_base64 = os.getenv("GOOGLE_CREDENTIALS_BASE64")
+            
+            if google_creds_base64:
+                # Produção: ler credenciais do ambiente (base64)
+                log("📊 Carregando credenciais Google do ambiente (base64)", "INFO")
+                import base64
+                
+                try:
+                    creds_json = base64.b64decode(google_creds_base64)
+                    creds_dict = json.loads(creds_json)
+                    
+                    creds = Credentials.from_service_account_info(
+                        creds_dict,
+                        scopes=scopes
+                    )
+                except Exception as e:
+                    log(f"❌ Erro decodificando GOOGLE_CREDENTIALS_BASE64: {e}", "ERROR")
+                    return
+                    
+            elif os.path.exists(self.credentials_file):
+                # Desenvolvimento: ler credenciais de arquivo local
+                log(f"📊 Carregando credenciais Google do arquivo {self.credentials_file}", "INFO")
+                
+                creds = Credentials.from_service_account_file(
+                    self.credentials_file,
+                    scopes=scopes
+                )
+            else:
+                # Nenhuma credencial disponível
+                log(f"⚠️ Credenciais Google não encontradas (nem base64 nem arquivo {self.credentials_file})", "WARN")
+                return
             
             # Conectar ao Google Sheets
             client = gspread.authorize(creds)
@@ -631,18 +655,30 @@ class StateManager:
 
 # ===== CONEXÃO COM EXCHANGES =====
 class ExchangeConnector:
-    """Gerencia conexões com Binance (dados) e Hyperliquid (execução)"""
+    """Gerencia conexão com Hyperliquid (dados + execução)"""
     
     def __init__(self, cfg: TradingConfig):
         self.cfg = cfg
         
-        # Binance para dados históricos
-        self.binance = ccxt.binance({
-            'apiKey': os.getenv('BINANCE_API_KEY', ''),
-            'secret': os.getenv('BINANCE_API_SECRET', ''),
-            'enableRateLimit': True,
-            'options': {'defaultType': 'future'}
-        })
+        # Binance OPCIONAL (apenas se keys estiverem configuradas)
+        binance_key = os.getenv('BINANCE_API_KEY', '')
+        binance_secret = os.getenv('BINANCE_API_SECRET', '')
+        
+        if binance_key and binance_secret:
+            try:
+                self.binance = ccxt.binance({
+                    'apiKey': binance_key,
+                    'secret': binance_secret,
+                    'enableRateLimit': True,
+                    'options': {'defaultType': 'future'}
+                })
+                log("✅ Binance conectada (backup para dados)", "INFO")
+            except Exception as e:
+                log(f"⚠️ Binance não disponível: {e}", "WARN")
+                self.binance = None
+        else:
+            log("ℹ️  Binance não configurada (usando apenas Hyperliquid)", "INFO")
+            self.binance = None
         
         # Hyperliquid para execução
         wallet_address = os.getenv("WALLET_ADDRESS", "")
@@ -670,17 +706,12 @@ class ExchangeConnector:
         # Wallet address é SEMPRE a vault (subconta)
         self.wallet_address = vault_address
         
-        log("✅ Conexões estabelecidas: Binance (dados) + Hyperliquid (execução)", "INFO")
+        log("✅ Conexões estabelecidas: Hyperliquid (dados + execução)", "INFO")
     
     def fetch_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
-        """Busca dados históricos da Binance"""
+        """Busca dados históricos da Hyperliquid"""
         try:
-            # Converter símbolo Hyperliquid para Binance
-            # SOL/USDC:USDC -> SOL/USDT:USDT
-            # XRP/USDC:USDC -> XRP/USDT:USDT
             coin = symbol.split('/')[0]  # SOL ou XRP
-            symbol_binance = f"{coin}/USDT:USDT"
-            
             timeframe = self.cfg.TIMEFRAME
             
             # Calcular limite de candles: dias * 24 horas + margem
@@ -688,12 +719,19 @@ class ExchangeConnector:
             
             since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
             
-            ohlcv = self.binance.fetch_ohlcv(
-                symbol_binance,
+            log(f"📊 Buscando dados históricos de {coin} na Hyperliquid...", "DEBUG")
+            
+            # Buscar direto da Hyperliquid
+            ohlcv = self.hyperliquid.fetch_ohlcv(
+                symbol,
                 timeframe=timeframe,
                 since=since,
                 limit=limit
             )
+            
+            if not ohlcv or len(ohlcv) == 0:
+                log(f"⚠️ Nenhum dado histórico retornado para {coin}", "WARN")
+                return pd.DataFrame()
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -709,11 +747,10 @@ class ExchangeConnector:
     def get_current_price(self, symbol: str) -> float:
         """Busca preço atual de um símbolo"""
         try:
-            # Converter para formato Binance
             coin = symbol.split('/')[0]
-            symbol_binance = f"{coin}/USDT:USDT"
             
-            ticker = self.binance.fetch_ticker(symbol_binance)
+            # Buscar direto da Hyperliquid
+            ticker = self.hyperliquid.fetch_ticker(symbol)
             price = ticker['last']
             log(f"💰 Preço atual {coin}: ${price:.4f}", "DEBUG")
             return price
