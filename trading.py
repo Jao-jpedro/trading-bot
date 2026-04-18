@@ -652,18 +652,23 @@ class ExchangeConnector:
         if not wallet_address or not private_key:
             raise ValueError("WALLET_ADDRESS e HYPERLIQUID_PRIVATE_KEY devem estar configurados")
         
+        if not vault_address:
+            raise ValueError("HYPERLIQUID_SUBACCOUNT (vault/subconta) deve estar configurada")
+        
+        log(f"🏦 Configurando operação na subconta (vault): {vault_address}", "INFO")
+        log(f"🔑 Carteira principal (assinatura): {wallet_address}", "INFO")
+        
         self.hyperliquid = ccxt.hyperliquid({
             'walletAddress': wallet_address,
             'privateKey': private_key,
             'enableRateLimit': True,
         })
         
-        # Usar subconta se configurada
-        if vault_address:
-            self.hyperliquid.options['vaultAddress'] = vault_address
-            log(f"🏦 Usando subconta (vault): {vault_address}", "INFO")
+        # SEMPRE usar subconta (obrigatório)
+        self.hyperliquid.options['vaultAddress'] = vault_address
         
-        self.wallet_address = vault_address if vault_address else wallet_address
+        # Wallet address é SEMPRE a vault (subconta)
+        self.wallet_address = vault_address
         
         log("✅ Conexões estabelecidas: Binance (dados) + Hyperliquid (execução)", "INFO")
     
