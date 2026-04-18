@@ -686,8 +686,8 @@ class ExchangeConnector:
         
         # Hyperliquid para execução
         wallet_address = os.getenv("WALLET_ADDRESS", "")
-        private_key = os.getenv("HYPERLIQUID_PRIVATE_KEY") or os.getenv("PRIVATE_KEY", "")
-        vault_address = os.getenv("HYPERLIQUID_SUBACCOUNT") or os.getenv("VAULT_ADDRESS", "")  # Subconta
+        private_key = os.getenv("HYPERLIQUID_PRIVATE_KEY", "")  # Usar APENAS esta variável
+        vault_address = os.getenv("HYPERLIQUID_SUBACCOUNT", "")  # Subconta
         
         if not wallet_address or not private_key:
             raise ValueError("WALLET_ADDRESS e HYPERLIQUID_PRIVATE_KEY devem estar configurados")
@@ -697,6 +697,7 @@ class ExchangeConnector:
         
         log(f"🏦 Configurando operação na subconta (vault): {vault_address}", "INFO")
         log(f"🔑 Carteira principal (assinatura): {wallet_address}", "INFO")
+        log(f"🔐 Private key configurada: {private_key[:10]}...{private_key[-4:]}", "DEBUG")
         
         self.hyperliquid = ccxt.hyperliquid({
             'walletAddress': wallet_address,
@@ -1391,11 +1392,10 @@ def main():
     # Loop principal
     log("🔁 Entrando no loop principal (Ctrl+C para parar)", "INFO")
     
-    # Intervalo de verificação: 1 hora (timeframe do gráfico)
-    # Como usamos gráfico de 1h, não faz sentido checar a cada minuto
-    check_interval = 3600  # 1 hora em segundos
+    # Intervalo de verificação: 3 minutos
+    check_interval = 180  # 3 minutos em segundos
     
-    log(f"⏰ Intervalo entre ciclos: {check_interval/60:.0f} minutos ({check_interval/3600:.1f}h)", "INFO")
+    log(f"⏰ Intervalo entre ciclos: {check_interval/60:.0f} minutos", "INFO")
     
     try:
         while True:
