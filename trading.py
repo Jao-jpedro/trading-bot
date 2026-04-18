@@ -734,8 +734,9 @@ class ExchangeConnector:
             
             log(f"📊 Buscando dados históricos de {coin} na Hyperliquid...", "DEBUG")
             
-            # Adicionar delay para evitar rate limit
-            time.sleep(0.5)  # 500ms entre requisições
+            # Adicionar delay ANTES da requisição para evitar rate limit
+            log(f"⏳ Aguardando 2s antes de buscar dados (evitar rate limit)...", "DEBUG")
+            time.sleep(2.0)  # 2 segundos entre requisições
             
             # Buscar da Hyperliquid
             ohlcv = self.hyperliquid.fetch_ohlcv(
@@ -1390,14 +1391,17 @@ def main():
     # Loop principal
     log("🔁 Entrando no loop principal (Ctrl+C para parar)", "INFO")
     
-    # Intervalo de verificação (a cada 60 segundos para monitoramento rápido)
-    check_interval = 60  # 60 segundos
+    # Intervalo de verificação: 1 hora (timeframe do gráfico)
+    # Como usamos gráfico de 1h, não faz sentido checar a cada minuto
+    check_interval = 3600  # 1 hora em segundos
+    
+    log(f"⏰ Intervalo entre ciclos: {check_interval/60:.0f} minutos ({check_interval/3600:.1f}h)", "INFO")
     
     try:
         while True:
             strategy.run_cycle()
             
-            log(f"⏰ Próximo ciclo em {check_interval} segundos...", "INFO")
+            log(f"⏰ Próximo ciclo em {check_interval/60:.0f} minutos...", "INFO")
             time.sleep(check_interval)
             
     except KeyboardInterrupt:
