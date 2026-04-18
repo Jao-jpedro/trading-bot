@@ -223,10 +223,10 @@ class GoogleSheetsLogger:
             
             # Verificar se cabeçalho existe
             headers = self.worksheet.row_values(1)
-            if not headers or headers[0] != "ID":
-                # Criar cabeçalho com ID e colunas de indicadores
-                self.worksheet.update('A1:I1', [[
-                    'ID', 'Data', 'Hora', 'Preço', 'Cripto', 'Operação', 'Tipo de Operação', 'RSI', 'Motivo'
+            if not headers or headers[0] != "Data":
+                # Criar cabeçalho com colunas de indicadores
+                self.worksheet.update('A1:H1', [[
+                    'Data', 'Hora', 'Preço', 'Cripto', 'Operação', 'Tipo de Operação', 'RSI', 'Motivo'
                 ]])
                 log("✅ Cabeçalhos criados na planilha", "INFO")
             
@@ -239,7 +239,7 @@ class GoogleSheetsLogger:
             log(traceback.format_exc(), "DEBUG")
             self.enabled = False
     
-    def log_trade(self, price: float, crypto: str, operation: str, trade_type: str, rsi: float = None, reason: str = "", trade_id: str = ""):
+    def log_trade(self, price: float, crypto: str, operation: str, trade_type: str, rsi: float = None, reason: str = ""):
         """
         Registra uma operação na planilha
         
@@ -250,7 +250,6 @@ class GoogleSheetsLogger:
             trade_type: Tipo de trade (Compra ou Venda)
             rsi: Valor do RSI no momento da operação
             reason: Motivo da operação (ex: "RSI < 20", "Stop Loss", "Take Profit")
-            trade_id: ID único para vincular compra e venda
         """
         if not self.enabled:
             log("⚠️ Google Sheets não habilitado, registro ignorado", "DEBUG")
@@ -262,14 +261,14 @@ class GoogleSheetsLogger:
             data = now.strftime("%d/%m/%Y")
             hora = now.strftime("%H:%M:%S")
             
-            # Preparar linha de dados com ID na primeira coluna
+            # Preparar linha de dados
             rsi_str = f"{rsi:.2f}" if rsi is not None else "-"
-            row = [trade_id, data, hora, f"{price:.4f}", crypto, operation, trade_type, rsi_str, reason]
+            row = [data, hora, f"{price:.4f}", crypto, operation, trade_type, rsi_str, reason]
             
             # Adicionar linha na planilha
             self.worksheet.append_row(row, value_input_option='USER_ENTERED')
             
-            log(f"📊 Registro Google Sheets: ID={trade_id} | {data} {hora} | {crypto} | {operation} | {trade_type} @ ${price:.4f} | RSI: {rsi_str} | {reason}", "INFO")
+            log(f"📊 Registro Google Sheets: {data} {hora} | {crypto} | {operation} | {trade_type} @ ${price:.4f} | RSI: {rsi_str} | {reason}", "INFO")
             return True
             
         except Exception as e:
@@ -510,24 +509,17 @@ class StateManager:
     def record_buy(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", rsi: float = None):
         """Registra uma compra"""
         now = datetime.now()
-        
-        # Gerar ID único para o trade: CRYPTO_TIMESTAMP
-        # Exemplo: SOL_20260418_143025
-        trade_id = f"{crypto}_{now.strftime('%Y%m%d_%H%M%S')}"
-        
         self.state["last_buy_timestamp"] = now.isoformat()
         self.state["position_entries"].append({
             "timestamp": now.isoformat(),
             "price": price,
             "amount": amount,
             "rsi": rsi,
-            "operation": operation,
-            "trade_id": trade_id  # Salvar ID para usar na venda
+            "operation": operation
         })
         self.save_state()
         
         log(f"💾 COMPRA REGISTRADA NO ESTADO:", "INFO")
-        log(f"   🆔 Trade ID: {trade_id}", "INFO")
         log(f"   📅 Data/Hora: {now.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
         log(f"   💰 Preço: ${price:.4f}", "INFO")
         log(f"   🪙 Quantidade: {amount:.4f} {crypto}", "INFO")
@@ -540,42 +532,37 @@ class StateManager:
         else:
             reason = f"RSI sobrecomprado ({rsi:.2f} > 80)" if rsi else "Entrada SHORT"
         
-        # Registrar no Google Sheets com trade_id
+        # Registrar no Google Sheets
         sheets_logger.log_trade(
             price=price,
             crypto=crypto,
             operation=operation,
             trade_type="Compra",
             rsi=rsi,
-            reason=reason,
-            trade_id=trade_id
+            reason=reason
         )
-        
-        return trade_id  # Retornar ID para usar depois
     
-    def record_sell(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", rsi: float = None, reason: str = "", trade_id: str = ""):
+    def record_sell(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", rsi: float = None, reason: str = ""):
         """Registra uma venda"""
         now = datetime.now()
         self.state["last_sell_timestamp"] = now.isoformat()
         self.save_state()
         
         log(f"💾 VENDA REGISTRADA NO ESTADO:", "INFO")
-        log(f"   🆔 Trade ID: {trade_id}", "INFO")
         log(f"   📅 Data/Hora: {now.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
         log(f"   💰 Preço: ${price:.4f}", "INFO")
         log(f"   🪙 Quantidade: {amount:.4f} {crypto}", "INFO")
         log(f"   📊 RSI: {rsi:.2f}" if rsi else "", "INFO")
         log(f"   🎯 Motivo: {reason}", "INFO")
         
-        # Registrar no Google Sheets com mesmo trade_id da compra
+        # Registrar no Google Sheets
         sheets_logger.log_trade(
             price=price,
             crypto=crypto,
             operation=operation,
             trade_type="Venda",
             rsi=rsi,
-            reason=reason,
-            trade_id=trade_id
+            reason=reason
         )
     
     def get_average_entry_price(self) -> float:
@@ -1061,8 +1048,8 @@ class TradingStrategy:
         success = self.exchange.create_market_order(symbol, side, amount_usd, self.cfg.LEVERAGE)
         
         if success:
-            # Registrar entrada com RSI e capturar trade_id
-            trade_id = self.state.record_buy(current_price, amount_coins, coin, signal, rsi)
+            # Registrar entrada com RSI
+            self.state.record_buy(current_price, amount_coins, coin, signal, rsi)
             
             # Calcular preços de SL e TP para referência
             stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
@@ -1080,7 +1067,7 @@ class TradingStrategy:
             log(f"   🔴 Stop Loss: ${stop_loss_price:.4f} (-{stop_loss_roi:.0f}% ROI)", "INFO")
             log(f"   🟢 Take Profit: ${take_profit_price:.4f} (+{take_profit_roi:.0f}% ROI)", "INFO")
             
-            # Salvar alvos no estado para monitoramento (incluindo trade_id)
+            # Salvar alvos no estado para monitoramento
             self.state.state["active_targets"] = {
                 "symbol": symbol,
                 "coin": coin,
@@ -1089,8 +1076,7 @@ class TradingStrategy:
                 "take_profit_price": take_profit_price,
                 "amount": amount_coins,
                 "signal": signal,
-                "entry_rsi": rsi,
-                "trade_id": trade_id  # Salvar trade_id para usar na venda
+                "entry_rsi": rsi
             }
             self.state.save_state()
             
@@ -1112,121 +1098,87 @@ class TradingStrategy:
         return success
     
     def monitor_and_execute_exits(self):
-        """
-        Monitora posições ativas e executa saídas quando atingem Stop Loss ou Take Profit.
-        Sistema controlado pelo bot (não pela exchange).
-        """
-        # Verificar se há posição ativa
-        active = self.state.state.get("active_targets")
-        if not active:
-            return
+        """Cria ordens de Stop Loss e Take Profit baseadas no preço de entrada"""
+        coin = symbol.split('/')[0]
+        log(f"📤 Criando ordens de saída (SL e TP) para {coin}...", "INFO")
         
-        symbol = active.get("symbol")
-        coin = active.get("coin")
-        entry_price = active.get("entry_price")
-        stop_loss_price = active.get("stop_loss_price")
-        take_profit_price = active.get("take_profit_price")
-        amount = active.get("amount")
-        signal = active.get("signal")
-        entry_rsi = active.get("entry_rsi")
-        trade_id = active.get("trade_id")
+        # Arredondar quantidade
+        amount = float(self.exchange.hyperliquid.amount_to_precision(symbol, total_amount))
         
-        if not all([symbol, coin, entry_price, stop_loss_price, take_profit_price, amount, signal, trade_id]):
-            log("⚠️ Dados incompletos em active_targets, ignorando monitoramento", "WARN")
-            return
+        # ROI real com leverage
+        stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
+        take_profit_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * self.cfg.LEVERAGE
         
+        if signal == "LONG":
+            # LONG: SL abaixo, TP acima
+            stop_loss_price = entry_price * (1 - self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+            take_profit_price = entry_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+            exit_side = 'sell'  # Sair de LONG = vender
+        else:
+            # SHORT: SL acima, TP abaixo
+            stop_loss_price = entry_price * (1 + self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+            take_profit_price = entry_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+            exit_side = 'buy'  # Sair de SHORT = comprar
+        
+        # Criar Stop Loss (ordem limit)
         try:
-            # Buscar preço atual
-            ticker = self.exchange.hyperliquid.fetch_ticker(symbol)
-            current_price = ticker['last']
+            sl_order = self.exchange.hyperliquid.create_order(
+                symbol=symbol,
+                type='limit',
+                side=exit_side,
+                amount=amount,
+                price=stop_loss_price,
+                params={'reduceOnly': True, 'postOnly': False}
+            )
+            log(f"   🔴 Stop Loss: 100% ({amount:.4f} {coin}) @ ${stop_loss_price:.4f} (-{stop_loss_roi:.0f}% ROI)", "INFO")
             
-            # Calcular ROI atual
-            if signal == "LONG":
-                price_change_pct = ((current_price - entry_price) / entry_price) * 100
-            else:  # SHORT
-                price_change_pct = ((entry_price - current_price) / entry_price) * 100
+            # Registrar ordem criada no estado para monitoramento futuro
+            if not hasattr(self.state.state, 'pending_exit_orders'):
+                self.state.state['pending_exit_orders'] = []
             
-            roi_current = price_change_pct * self.cfg.LEVERAGE
+            self.state.state['pending_exit_orders'].append({
+                'order_id': sl_order.get('id'),
+                'symbol': symbol,
+                'coin': coin,
+                'type': 'stop_loss',
+                'price': stop_loss_price,
+                'amount': amount,
+                'operation': signal
+            })
+            self.state.save_state()
             
-            # Verificar se atingiu Stop Loss ou Take Profit
-            hit_stop_loss = False
-            hit_take_profit = False
-            
-            if signal == "LONG":
-                # LONG: SL abaixo, TP acima
-                if current_price <= stop_loss_price:
-                    hit_stop_loss = True
-                elif current_price >= take_profit_price:
-                    hit_take_profit = True
-            else:  # SHORT
-                # SHORT: SL acima, TP abaixo
-                if current_price >= stop_loss_price:
-                    hit_stop_loss = True
-                elif current_price <= take_profit_price:
-                    hit_take_profit = True
-            
-            # Executar saída se necessário
-            if hit_stop_loss or hit_take_profit:
-                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit"
-                emoji = "🔴" if hit_stop_loss else "🟢"
-                
-                log(f"{emoji} {exit_type} atingido para {coin}!", "INFO")
-                log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
-                log(f"   � Preço atual: ${current_price:.4f}", "INFO")
-                log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
-                
-                # Executar ordem de saída (MARKET para garantir execução imediata)
-                exit_side = "sell" if signal == "LONG" else "buy"
-                
-                # Calcular valor em USD para fechar posição
-                amount_usd = amount * current_price
-                
-                success = self.exchange.create_market_order(
-                    symbol,
-                    exit_side,
-                    amount_usd,
-                    self.cfg.LEVERAGE
-                )
-                
-                if success:
-                    # Registrar venda no Google Sheets com mesmo trade_id da compra
-                    reason = exit_type
-                    self.state.record_sell(
-                        current_price,
-                        amount,
-                        coin,
-                        signal,
-                        rsi=None,  # Não temos RSI na saída
-                        reason=reason,
-                        trade_id=trade_id  # Usar o mesmo ID da compra!
-                    )
-                    
-                    # Notificar Discord
-                    discord.send(
-                        f"{emoji} {exit_type.upper()} EXECUTADO - {coin}",
-                        f"**Preço de entrada:** ${entry_price:.4f}\n"
-                        f"**Preço de saída:** ${current_price:.4f}\n"
-                        f"**Quantidade:** {amount:.4f} {coin}\n"
-                        f"**Operação:** {signal}\n"
-                        f"**ROI:** {roi_current:+.2f}%\n"
-                        f"**Trade ID:** {trade_id}",
-                        0xff0000 if hit_stop_loss else 0x00ff00
-                    )
-                    
-                    # Limpar estado
-                    self.state.state["active_targets"] = {}
-                    self.state.state["position_entries"] = []
-                    self.state.save_state()
-                    
-                    log(f"✅ Posição {coin} fechada com sucesso!", "INFO")
-                else:
-                    log(f"❌ Erro ao executar ordem de saída para {coin}", "ERROR")
-            else:
-                # Apenas log de monitoramento (sem poluir muito)
-                log(f"👀 Monitorando {coin}: Preço ${current_price:.4f} | ROI {roi_current:+.2f}% | SL ${stop_loss_price:.4f} | TP ${take_profit_price:.4f}", "DEBUG")
-                
         except Exception as e:
-            log(f"❌ Erro monitorando saídas: {e}", "ERROR")
+            log(f"   ❌ Erro criando Stop Loss: {e}", "ERROR")
+        
+        # Criar Take Profit (ordem limit)
+        try:
+            tp_order = self.exchange.hyperliquid.create_order(
+                symbol=symbol,
+                type='limit',
+                side=exit_side,
+                amount=amount,
+                price=take_profit_price,
+                params={'reduceOnly': True, 'postOnly': False}
+            )
+            log(f"   🟢 Take Profit: 100% ({amount:.4f} {coin}) @ ${take_profit_price:.4f} (+{take_profit_roi:.0f}% ROI)", "INFO")
+            
+            # Registrar ordem criada no estado para monitoramento futuro
+            if not hasattr(self.state.state, 'pending_exit_orders'):
+                self.state.state['pending_exit_orders'] = []
+            
+            self.state.state['pending_exit_orders'].append({
+                'order_id': tp_order.get('id'),
+                'symbol': symbol,
+                'coin': coin,
+                'type': 'take_profit',
+                'price': take_profit_price,
+                'amount': amount,
+                'operation': signal
+            })
+            self.state.save_state()
+            
+        except Exception as e:
+            log(f"   ❌ Erro criando Take Profit: {e}", "ERROR")
     
     def cancel_all_orders(self, symbol: str):
         """Cancela todas as ordens abertas de um símbolo"""
@@ -1243,14 +1195,83 @@ class TradingStrategy:
         except Exception as e:
             log(f"❌ Erro cancelando ordens de {symbol}: {e}", "ERROR")
     
+    def check_executed_orders(self):
+        """Verifica se alguma ordem de saída foi executada e registra no Google Sheets"""
+        try:
+            pending_orders = self.state.state.get('pending_exit_orders', [])
+            
+            if not pending_orders:
+                return
+            
+            log(f"🔍 Verificando {len(pending_orders)} ordens pendentes...", "DEBUG")
+            
+            remaining_orders = []
+            
+            for order_info in pending_orders:
+                try:
+                    symbol = order_info['symbol']
+                    order_id = order_info['order_id']
+                    
+                    # Buscar ordem
+                    order = self.exchange.hyperliquid.fetch_order(order_id, symbol)
+                    
+                    # Verificar se foi executada
+                    if order['status'] == 'closed' or order['status'] == 'filled':
+                        # Ordem executada! Registrar venda
+                        coin = order_info['coin']
+                        price = order_info['price']
+                        amount = order_info['amount']
+                        operation = order_info['operation']
+                        order_type = order_info['type']
+                        
+                        log(f"✅ Ordem executada: {order_type.upper()} - {coin} @ ${price:.4f}", "INFO")
+                        
+                        # Registrar venda no estado e Google Sheets
+                        self.state.record_sell(price, amount, coin, operation)
+                        
+                        # Notificar Discord
+                        emoji = "🔴" if order_type == "stop_loss" else "🟢"
+                        title = f"{emoji} {order_type.replace('_', ' ').upper()} EXECUTADO - {coin}"
+                        
+                        discord.send(
+                            title,
+                            f"**Preço de saída:** ${price:.4f}\n"
+                            f"**Quantidade:** {amount:.4f} {coin}\n"
+                            f"**Operação:** {operation}",
+                            0xff0000 if order_type == "stop_loss" else 0x00ff00
+                        )
+                        
+                        # Limpar position_entries se fechou completamente
+                        self.state.state["position_entries"] = []
+                        self.state.save_state()
+                        
+                    elif order['status'] == 'canceled':
+                        # Ordem cancelada, remover da lista
+                        log(f"⚠️ Ordem cancelada: {order_type.upper()} - {order_info['coin']}", "DEBUG")
+                    else:
+                        # Ordem ainda ativa
+                        remaining_orders.append(order_info)
+                        
+                except Exception as e:
+                    log(f"⚠️ Erro verificando ordem {order_info.get('order_id')}: {e}", "DEBUG")
+                    # Manter na lista para tentar novamente
+                    remaining_orders.append(order_info)
+            
+            # Atualizar lista de ordens pendentes
+            self.state.state['pending_exit_orders'] = remaining_orders
+            self.state.save_state()
+            
+        except Exception as e:
+            log(f"❌ Erro verificando ordens executadas: {e}", "ERROR")
+    
     def run_cycle(self):
         """Executa um ciclo da estratégia para todos os assets"""
         log("=" * 80, "INFO")
         log("🔄 INICIANDO CICLO", "INFO")
         log("=" * 80, "INFO")
         
-        # NOVO SISTEMA: Monitorar posições ativas e executar saídas
-        self.monitor_and_execute_exits()
+        # Verificar ordens executadas (Stop Loss / Take Profit)
+        self.check_executed_orders()
         
         # Mostrar estado atual
         self.state.show_state_summary()
