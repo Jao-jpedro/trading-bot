@@ -660,6 +660,10 @@ class ExchangeConnector:
     def __init__(self, cfg: TradingConfig):
         self.cfg = cfg
         
+        # Cache para dados históricos (evitar rate limit)
+        self._cache = {}
+        self._cache_duration = 3600  # 1 hora em segundos
+        
         # Binance OPCIONAL (apenas se keys estiverem configuradas)
         binance_key = os.getenv('BINANCE_API_KEY', '')
         binance_secret = os.getenv('BINANCE_API_SECRET', '')
@@ -709,19 +713,31 @@ class ExchangeConnector:
         log("✅ Conexões estabelecidas: Hyperliquid (dados + execução)", "INFO")
     
     def fetch_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
-        """Busca dados históricos da Hyperliquid"""
+        """Busca dados históricos com cache (evita rate limit)"""
         try:
-            coin = symbol.split('/')[0]  # SOL ou XRP
+            coin = symbol.split('/')[0]
+            cache_key = f"{symbol}_{days}"
+            
+            # Verificar cache primeiro
+            if cache_key in self._cache:
+                cached_data, cached_time = self._cache[cache_key]
+                age = time.time() - cached_time
+                
+                if age < self._cache_duration:
+                    log(f"📊 Usando dados em cache de {coin} ({age/60:.1f} min atrás)", "DEBUG")
+                    return cached_data
+            
+            # Cache expirado ou não existe - buscar novos dados
             timeframe = self.cfg.TIMEFRAME
-            
-            # Calcular limite de candles: dias * 24 horas + margem
             limit = days * 24 + 50
-            
             since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
             
             log(f"📊 Buscando dados históricos de {coin} na Hyperliquid...", "DEBUG")
             
-            # Buscar direto da Hyperliquid
+            # Adicionar delay para evitar rate limit
+            time.sleep(0.5)  # 500ms entre requisições
+            
+            # Buscar da Hyperliquid
             ohlcv = self.hyperliquid.fetch_ohlcv(
                 symbol,
                 timeframe=timeframe,
@@ -735,6 +751,9 @@ class ExchangeConnector:
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # Salvar no cache
+            self._cache[cache_key] = (df, time.time())
             
             log(f"📊 Dados históricos {coin} ({timeframe}): {len(df)} candles, {df['timestamp'].min()} até {df['timestamp'].max()}", "INFO")
             
