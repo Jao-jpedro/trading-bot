@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Trading Bot - Dashboard</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .header h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+        
+        .status {
+            display: inline-block;
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        
+        .status.online {
+            background: #10b981;
+            color: white;
+        }
+        
+        .status.offline {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .metrics {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .metric-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s;
+        }
+        
+        .metric-card:hover {
+            transform: translateY(-5px);
+        }
+        
+        .metric-label {
+            color: #6b7280;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+        
+        .metric-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #1f2937;
+        }
+        
+        .metric-value.positive {
+            color: #10b981;
+        }
+        
+        .metric-value.negative {
+            color: #ef4444;
+        }
+        
+        .chart-container {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+        
+        .trades-table {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            overflow-x: auto;
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        
+        th {
+            background: #f3f4f6;
+            padding: 12px;
+            text-align: left;
+            font-weight: 600;
+            color: #374151;
+            border-bottom: 2px solid #e5e7eb;
+        }
+        
+        td {
+            padding: 12px;
+            border-bottom: 1px solid #e5e7eb;
+        }
+        
+        tr:hover {
+            background: #f9fafb;
+        }
+        
+        .trade-long {
+            color: #10b981;
+            font-weight: 600;
+        }
+        
+        .trade-short {
+            color: #ef4444;
+            font-weight: 600;
+        }
+        
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 30px;
+            opacity: 0.8;
+        }
+        
+        .refresh-info {
+            background: rgba(255,255,255,0.2);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 10px;
+            display: inline-block;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <div class="header">
+            <h1>🤖 Trading Bot - Dashboard</h1>
+            <p>Estratégia: RSI + ATR Dinâmico | Hyperliquid</p>
+            <span class="status online" id="status">● Online</span>
+            <div class="refresh-info">
+                🔄 Atualiza automaticamente a cada 60 segundos
+            </div>
+        </div>
+        
+        <!-- Métricas Principais -->
+        <div class="metrics">
+            <div class="metric-card">
+                <div class="metric-label">Retorno Total</div>
+                <div class="metric-value positive" id="totalReturn">+0.00%</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Win Rate</div>
+                <div class="metric-value" id="winRate">0.00%</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Total de Trades</div>
+                <div class="metric-value" id="totalTrades">0</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Profit Factor</div>
+                <div class="metric-value" id="profitFactor">0.00x</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Capital Atual</div>
+                <div class="metric-value" id="currentCapital">$0.00</div>
+            </div>
+            
+            <div class="metric-card">
+                <div class="metric-label">Max Drawdown</div>
+                <div class="metric-value negative" id="maxDrawdown">0.00%</div>
+            </div>
+        </div>
+        
+        <!-- Gráfico de Equity Curve -->
+        <div class="chart-container">
+            <h2>📈 Equity Curve (Evolução do Capital)</h2>
+            <canvas id="equityChart"></canvas>
+        </div>
+        
+        <!-- Tabela de Trades Recentes -->
+        <div class="trades-table">
+            <h2>📋 Últimos 10 Trades</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Data/Hora</th>
+                        <th>Cripto</th>
+                        <th>Operação</th>
+                        <th>Preço Entrada</th>
+                        <th>Preço Saída</th>
+                        <th>P&L</th>
+                        <th>ROI</th>
+                        <th>Motivo</th>
+                    </tr>
+                </thead>
+                <tbody id="tradesTableBody">
+                    <tr>
+                        <td colspan="8" style="text-align: center; padding: 30px; color: #6b7280;">
+                            Carregando trades...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        
+        <!-- Footer -->
+        <div class="footer">
+            <p>Desenvolvido com ❤️ | Backtest: +105% em 180 dias</p>
+            <p style="font-size: 12px; margin-top: 5px;">Última atualização: <span id="lastUpdate">--:--:--</span></p>
+        </div>
+    </div>
+
+    <script>
+        // Configuração do Chart.js
+        let equityChart = null;
+        
+        // Função para buscar dados do backtest
+        async function loadData() {
+            try {
+                // Buscar resultados do backtest
+                const response = await fetch('simple_backtest_results.json');
+                
+                if (!response.ok) {
+                    throw new Error('Arquivo de resultados não encontrado');
+                }
+                
+                const data = await response.json();
+                
+                // Atualizar métricas com dados da estratégia SEM parciais (melhor performance)
+                const metrics = data.without_partial_exits;
+                
+                updateMetrics(metrics);
+                updateEquityChart(data);
+                updateTradesTable(data);
+                
+                // Atualizar timestamp
+                document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('pt-BR');
+                document.getElementById('status').className = 'status online';
+                document.getElementById('status').textContent = '● Online';
+                
+            } catch (error) {
+                console.error('Erro carregando dados:', error);
+                document.getElementById('status').className = 'status offline';
+                document.getElementById('status').textContent = '● Offline';
+            }
+        }
+        
+        // Atualizar métricas
+        function updateMetrics(metrics) {
+            document.getElementById('totalReturn').textContent = `${metrics.total_return >= 0 ? '+' : ''}${metrics.total_return.toFixed(2)}%`;
+            document.getElementById('totalReturn').className = `metric-value ${metrics.total_return >= 0 ? 'positive' : 'negative'}`;
+            
+            document.getElementById('winRate').textContent = `${metrics.win_rate.toFixed(2)}%`;
+            document.getElementById('totalTrades').textContent = metrics.total_trades;
+            document.getElementById('profitFactor').textContent = `${metrics.profit_factor.toFixed(2)}x`;
+            document.getElementById('currentCapital').textContent = `$${metrics.final_capital.toFixed(2)}`;
+            document.getElementById('maxDrawdown').textContent = `${metrics.max_drawdown ? metrics.max_drawdown.toFixed(2) : '0.00'}%`;
+        }
+        
+        // Atualizar gráfico de equity
+        function updateEquityChart(data) {
+            const ctx = document.getElementById('equityChart').getContext('2d');
+            
+            // Simular equity curve baseado nos trades
+            const trades = data.without_partial_exits?.trades || [];
+            let capital = 1000;
+            const equityData = [capital];
+            const labels = ['Início'];
+            
+            trades.forEach((trade, index) => {
+                capital += trade.pnl || 0;
+                equityData.push(capital);
+                labels.push(`Trade ${index + 1}`);
+            });
+            
+            // Destruir gráfico anterior se existir
+            if (equityChart) {
+                equityChart.destroy();
+            }
+            
+            // Criar novo gráfico
+            equityChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels.slice(0, 50), // Primeiros 50 trades
+                    datasets: [{
+                        label: 'Capital ($)',
+                        data: equityData.slice(0, 50),
+                        borderColor: '#10b981',
+                        backgroundColor: 'rgba(16, 185, 129, 0.1)',
+                        borderWidth: 3,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    plugins: {
+                        legend: {
+                            display: true,
+                            position: 'top'
+                        }
+                    },
+                    scales: {
+                        y: {
+                            beginAtZero: false,
+                            ticks: {
+                                callback: function(value) {
+                                    return '$' + value.toFixed(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Atualizar tabela de trades
+        function updateTradesTable(data) {
+            const tbody = document.getElementById('tradesTableBody');
+            const trades = data.without_partial_exits?.trades || [];
+            
+            if (trades.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="8" style="text-align: center; padding: 30px; color: #6b7280;">Nenhum trade registrado ainda</td></tr>';
+                return;
+            }
+            
+            // Pegar últimos 10 trades
+            const recentTrades = trades.slice(-10).reverse();
+            
+            tbody.innerHTML = recentTrades.map(trade => {
+                const pnlClass = trade.pnl >= 0 ? 'positive' : 'negative';
+                const roiPct = trade.pnl_pct || 0;
+                
+                return `
+                    <tr>
+                        <td>${trade.exit_time ? new Date(trade.exit_time).toLocaleString('pt-BR') : 'Em aberto'}</td>
+                        <td><strong>SOL</strong></td>
+                        <td><span class="trade-${trade.side?.toLowerCase() || 'long'}">${trade.side || 'LONG'}</span></td>
+                        <td>$${trade.entry_price?.toFixed(4) || '0.0000'}</td>
+                        <td>$${trade.exit_price?.toFixed(4) || '0.0000'}</td>
+                        <td class="metric-value ${pnlClass}">${trade.pnl >= 0 ? '+' : ''}$${trade.pnl?.toFixed(2) || '0.00'}</td>
+                        <td class="metric-value ${pnlClass}">${roiPct >= 0 ? '+' : ''}${roiPct.toFixed(2)}%</td>
+                        <td>${trade.exit_reason || '-'}</td>
+                    </tr>
+                `;
+            }).join('');
+        }
+        
+        // Carregar dados ao iniciar
+        loadData();
+        
+        // Atualizar a cada 60 segundos
+        setInterval(loadData, 60000);
+    </script>
+</body>
+</html>

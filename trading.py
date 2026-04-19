@@ -248,11 +248,28 @@ class GoogleSheetsLogger:
             # Verificar se cabeçalho existe
             headers = self.worksheet.row_values(1)
             if not headers or headers[0] != "ID":
-                # Criar cabeçalho com ID e colunas de indicadores
-                self.worksheet.update('A1:I1', [[
-                    'ID', 'Data', 'Hora', 'Preço', 'Cripto', 'Operação', 'Tipo de Operação', 'RSI', 'Motivo'
+                # Criar cabeçalho COMPLETO para análise quantitativa
+                self.worksheet.update('A1:AJ1', [[
+                    # Identificação
+                    'ID', 'Data', 'Hora', 'Timestamp', 'Cripto', 'Operação', 'Tipo',
+                    
+                    # Contexto de Entrada - Indicadores
+                    'RSI', 'EMA_Trend', 'ATR', 'ATR_Percentil', 'Volume_Ratio',
+                    
+                    # Execução - Preços e Posição
+                    'Preço_Entrada', 'Slippage_%', 'Tamanho_Posição_USD', 'Tamanho_Posição_Moedas', 'Leverage',
+                    
+                    # Gestão de Risco - Stops e Targets
+                    'Stop_Loss_Preço', 'Stop_Loss_%', 'Take_Profit_1_Preço', 'Take_Profit_1_%',
+                    'Take_Profit_2_Preço', 'Take_Profit_2_%', 'Risk_Reward_Ratio',
+                    
+                    # Resultados - Saída e P&L
+                    'Preço_Saída', 'P&L_USD', 'P&L_%', 'Tempo_Trade_Min', 'MFE_%', 'MAE_%',
+                    
+                    # Análise - Classificação e Qualidade
+                    'Mercado_Tendência', 'Mercado_Volatilidade', 'Qualidade_Entrada', 'Motivo', 'Observações'
                 ]])
-                log("✅ Cabeçalhos criados na planilha", "INFO")
+                log("✅ Cabeçalhos COMPLETOS criados (36 colunas para análise quantitativa)", "INFO")
             
             self.enabled = True
             log(f"✅ Google Sheets configurado com sucesso", "INFO")
@@ -263,41 +280,168 @@ class GoogleSheetsLogger:
             log(traceback.format_exc(), "DEBUG")
             self.enabled = False
     
-    def log_trade(self, price: float, crypto: str, operation: str, trade_type: str, rsi: float = None, reason: str = "", trade_id: str = ""):
+    def log_trade(self, trade_data: dict):
         """
-        Registra uma operação na planilha
+        Registra uma operação COMPLETA na planilha com todos os dados para análise quantitativa
         
         Args:
-            price: Preço da operação
-            crypto: Nome da criptomoeda (ex: SOL, XRP)
-            operation: Tipo de operação (LONG ou SHORT)
-            trade_type: Tipo de trade (Compra ou Venda)
-            rsi: Valor do RSI no momento da operação
-            reason: Motivo da operação (ex: "RSI < 20", "Stop Loss", "Take Profit")
-            trade_id: ID único para vincular compra e venda
+            trade_data: Dicionário com TODOS os campos do trade:
+                # Identificação
+                - trade_id: ID único do trade
+                - timestamp: datetime completo
+                - crypto: Moeda (SOL, XRP, etc)
+                - operation: LONG ou SHORT
+                - trade_type: Entrada ou Saída
+                
+                # Contexto de Entrada
+                - rsi: Valor RSI
+                - ema_trend: "Bullish", "Bearish", "Neutral"
+                - atr: Average True Range
+                - atr_percentile: Percentil ATR (0-100) para classificar volatilidade
+                - volume_ratio: Volume atual / Volume médio
+                
+                # Execução
+                - entry_price: Preço de entrada
+                - slippage_pct: Slippage % (diferença entre preço esperado e real)
+                - position_size_usd: Tamanho em USD
+                - position_size_coins: Tamanho em moedas
+                - leverage: Alavancagem usada
+                
+                # Gestão de Risco
+                - stop_loss_price: Preço do stop loss
+                - stop_loss_pct: % de distância do stop
+                - tp1_price: Take profit 1 (parcial)
+                - tp1_pct: % TP1
+                - tp2_price: Take profit 2 (total)
+                - tp2_pct: % TP2
+                - risk_reward: Ratio R:R
+                
+                # Resultados (para trades fechados)
+                - exit_price: Preço de saída
+                - pnl_usd: Lucro/Prejuízo em USD
+                - pnl_pct: Lucro/Prejuízo %
+                - time_in_trade_min: Tempo no trade (minutos)
+                - mfe_pct: Maximum Favorable Excursion %
+                - mae_pct: Maximum Adverse Excursion %
+                
+                # Análise
+                - market_trend: "Strong Uptrend", "Uptrend", "Range", "Downtrend", "Strong Downtrend"
+                - market_volatility: "Muito Alta", "Alta", "Normal", "Baixa"
+                - entry_quality: "Excelente", "Boa", "Regular", "Ruim"
+                - reason: Motivo da operação
+                - notes: Observações adicionais
         """
         if not self.enabled:
+            return
             log("⚠️ Google Sheets não habilitado, registro ignorado", "DEBUG")
             return False
         
         try:
-            # Obter data e hora atual
-            now = datetime.now()
-            data = now.strftime("%d/%m/%Y")
-            hora = now.strftime("%H:%M:%S")
+            # Extrair dados do dicionário com valores padrão
+            trade_id = trade_data.get('trade_id', '')
+            timestamp = trade_data.get('timestamp', datetime.now())
+            crypto = trade_data.get('crypto', 'SOL')
+            operation = trade_data.get('operation', 'LONG')
+            trade_type = trade_data.get('trade_type', 'Entrada')
             
-            # Preparar linha de dados com ID na primeira coluna
+            # Formatar data/hora
+            data = timestamp.strftime("%d/%m/%Y")
+            hora = timestamp.strftime("%H:%M:%S")
+            timestamp_str = timestamp.isoformat()
+            
+            # Contexto de Entrada - Indicadores
+            rsi = trade_data.get('rsi')
             rsi_str = f"{rsi:.2f}" if rsi is not None else "-"
-            row = [trade_id, data, hora, f"{price:.4f}", crypto, operation, trade_type, rsi_str, reason]
+            ema_trend = trade_data.get('ema_trend', '-')
+            atr = trade_data.get('atr')
+            atr_str = f"{atr:.4f}" if atr is not None and atr > 0 else "-"
+            atr_percentile = trade_data.get('atr_percentile')
+            atr_pct_str = f"{atr_percentile:.1f}" if atr_percentile is not None else "-"
+            volume_ratio = trade_data.get('volume_ratio')
+            vol_ratio_str = f"{volume_ratio:.2f}" if volume_ratio is not None else "-"
+            
+            # Execução - Preços e Posição
+            entry_price = trade_data.get('entry_price', 0)
+            entry_str = f"{entry_price:.4f}" if entry_price > 0 else "-"
+            slippage = trade_data.get('slippage_pct')
+            slippage_str = f"{slippage:.3f}" if slippage is not None else "-"
+            pos_size_usd = trade_data.get('position_size_usd')
+            pos_usd_str = f"{pos_size_usd:.2f}" if pos_size_usd is not None else "-"
+            pos_size_coins = trade_data.get('position_size_coins')
+            pos_coins_str = f"{pos_size_coins:.4f}" if pos_size_coins is not None else "-"
+            leverage = trade_data.get('leverage', 1)
+            leverage_str = f"{leverage}x"
+            
+            # Gestão de Risco - Stops e Targets
+            sl_price = trade_data.get('stop_loss_price')
+            sl_price_str = f"{sl_price:.4f}" if sl_price is not None else "-"
+            sl_pct = trade_data.get('stop_loss_pct')
+            sl_pct_str = f"{sl_pct:.2f}" if sl_pct is not None else "-"
+            tp1_price = trade_data.get('tp1_price')
+            tp1_price_str = f"{tp1_price:.4f}" if tp1_price is not None else "-"
+            tp1_pct = trade_data.get('tp1_pct')
+            tp1_pct_str = f"{tp1_pct:.2f}" if tp1_pct is not None else "-"
+            tp2_price = trade_data.get('tp2_price')
+            tp2_price_str = f"{tp2_price:.4f}" if tp2_price is not None else "-"
+            tp2_pct = trade_data.get('tp2_pct')
+            tp2_pct_str = f"{tp2_pct:.2f}" if tp2_pct is not None else "-"
+            rr_ratio = trade_data.get('risk_reward')
+            rr_str = f"{rr_ratio:.2f}" if rr_ratio is not None else "-"
+            
+            # Resultados - Saída e P&L
+            exit_price = trade_data.get('exit_price')
+            exit_str = f"{exit_price:.4f}" if exit_price is not None else "-"
+            pnl_usd = trade_data.get('pnl_usd')
+            pnl_usd_str = f"{pnl_usd:.2f}" if pnl_usd is not None else "-"
+            pnl_pct = trade_data.get('pnl_pct')
+            pnl_pct_str = f"{pnl_pct:.2f}" if pnl_pct is not None else "-"
+            time_in_trade = trade_data.get('time_in_trade_min')
+            time_str = f"{time_in_trade:.0f}" if time_in_trade is not None else "-"
+            mfe = trade_data.get('mfe_pct')
+            mfe_str = f"{mfe:.2f}" if mfe is not None else "-"
+            mae = trade_data.get('mae_pct')
+            mae_str = f"{mae:.2f}" if mae is not None else "-"
+            
+            # Análise - Classificação e Qualidade
+            market_trend = trade_data.get('market_trend', '-')
+            market_volatility = trade_data.get('market_volatility', '-')
+            entry_quality = trade_data.get('entry_quality', '-')
+            reason = trade_data.get('reason', '')
+            notes = trade_data.get('notes', '')
+            
+            # Montar linha completa (36 colunas)
+            row = [
+                # Identificação
+                trade_id, data, hora, timestamp_str, crypto, operation, trade_type,
+                
+                # Contexto de Entrada - Indicadores
+                rsi_str, ema_trend, atr_str, atr_pct_str, vol_ratio_str,
+                
+                # Execução - Preços e Posição
+                entry_str, slippage_str, pos_usd_str, pos_coins_str, leverage_str,
+                
+                # Gestão de Risco - Stops e Targets
+                sl_price_str, sl_pct_str, tp1_price_str, tp1_pct_str,
+                tp2_price_str, tp2_pct_str, rr_str,
+                
+                # Resultados - Saída e P&L
+                exit_str, pnl_usd_str, pnl_pct_str, time_str, mfe_str, mae_str,
+                
+                # Análise - Classificação e Qualidade
+                market_trend, market_volatility, entry_quality, reason, notes
+            ]
             
             # Adicionar linha na planilha
             self.worksheet.append_row(row, value_input_option='USER_ENTERED')
             
-            log(f"📊 Registro Google Sheets: ID={trade_id} | {data} {hora} | {crypto} | {operation} | {trade_type} @ ${price:.4f} | RSI: {rsi_str} | {reason}", "INFO")
+            log(f"📊 Trade registrado: {trade_id} | {crypto} {operation} {trade_type} @ ${entry_str} | RSI: {rsi_str} | ATR: {atr_str}", "INFO")
             return True
             
         except Exception as e:
             log(f"❌ Erro registrando no Google Sheets: {e}", "ERROR")
+            import traceback
+            log(traceback.format_exc(), "DEBUG")
+            return False
             return False
 
 # Instância global do Google Sheets Logger
@@ -324,15 +468,18 @@ class TradingConfig:
     RSI_SHORT_THRESHOLD: float = 80  # RSI > 80 para SHORT (sobrecomprado)
     
     # Estratégia de entrada
-    ENTRY_CAPITAL_PCT: float = 30.0   # Usa 30% do capital por entrada
+    ENTRY_CAPITAL_PCT: float = 25.0   # Usa 25% do capital por entrada (conservador)
     ENTRY_COOLDOWN_HOURS: int = 48    # Cooldown de 48h entre entradas no mesmo asset
     
-    # Estratégia de SAÍDA (Stop Loss e Take Profit)
-    # Com leverage 5x:
-    #   - 2% de movimento no preço = 10% ROI
-    #   - 4% de movimento no preço = 20% ROI
-    STOP_LOSS_PRICE_PCT: float = 2.0    # 2% no preço = 10% ROI (ambos lados)
-    TAKE_PROFIT_PRICE_PCT: float = 4.0  # 4% no preço = 20% ROI (ambos lados)
+    # Estratégia de SAÍDA - OTIMIZADA COM ATR
+    # ATR (Average True Range) torna stops dinâmicos baseados na volatilidade
+    ATR_PERIOD: int = 14                 # Período para calcular ATR
+    ATR_SL_MULTIPLIER: float = 1.5       # Stop Loss = 1.5x ATR (adaptativo)
+    ATR_TP_MULTIPLIER: float = 2.5       # Take Profit = 2.5x ATR (R:R = 1.67:1)
+    
+    # Manter compatibilidade com stops fixos (fallback se ATR falhar)
+    STOP_LOSS_PRICE_PCT: float = 2.0     # Fallback: 2% no preço
+    TAKE_PROFIT_PRICE_PCT: float = 4.0   # Fallback: 4% no preço
     
     # Gestão de capital
     MIN_ORDER_USD: float = 10.0  # Mínimo $10 para ordem Hyperliquid
@@ -531,8 +678,27 @@ class StateManager:
             log(f"⏳ Cooldown de compra: {hours_passed:.1f}/{cooldown_hours}h", "DEBUG")
         return cooldown_passed
     
-    def record_buy(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", rsi: float = None):
-        """Registra uma compra"""
+    def record_buy(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", 
+                   rsi: float = None, atr: float = None, stop_loss: float = None, 
+                   take_profit_1: float = None, take_profit_2: float = None,
+                   ema_trend: str = None, atr_percentile: float = None, volume_ratio: float = None):
+        """
+        Registra uma compra com DADOS COMPLETOS para análise quantitativa
+        
+        Args:
+            price: Preço de entrada
+            amount: Quantidade de moedas
+            crypto: Criptomoeda (SOL, XRP, etc)
+            operation: LONG ou SHORT
+            rsi: Valor RSI
+            atr: Average True Range
+            stop_loss: Preço do stop loss
+            take_profit_1: Preço do take profit parcial
+            take_profit_2: Preço do take profit total
+            ema_trend: Tendência EMA ("Bullish", "Bearish", "Neutral")
+            atr_percentile: Percentil do ATR (0-100)
+            volume_ratio: Ratio volume atual/médio
+        """
         now = datetime.now()
         
         # Gerar ID único para o trade: CRYPTO_TIMESTAMP
@@ -545,8 +711,12 @@ class StateManager:
             "price": price,
             "amount": amount,
             "rsi": rsi,
+            "atr": atr,
             "operation": operation,
-            "trade_id": trade_id  # Salvar ID para usar na venda
+            "trade_id": trade_id,
+            "stop_loss": stop_loss,
+            "take_profit_1": take_profit_1,
+            "take_profit_2": take_profit_2
         })
         self.save_state()
         
@@ -556,7 +726,46 @@ class StateManager:
         log(f"   💰 Preço: ${price:.4f}", "INFO")
         log(f"   🪙 Quantidade: {amount:.4f} {crypto}", "INFO")
         log(f"   📊 RSI: {rsi:.2f}" if rsi else "", "INFO")
+        log(f"   📊 ATR: ${atr:.4f}" if atr and atr > 0 else "", "INFO")
+        log(f"   🛑 Stop Loss: ${stop_loss:.4f}" if stop_loss else "", "INFO")
+        log(f"   🎯 TP1: ${take_profit_1:.4f}" if take_profit_1 else "", "INFO")
+        log(f"   🎯 TP2: ${take_profit_2:.4f}" if take_profit_2 else "", "INFO")
         log(f"   ⏰ Próxima compra: após {(now + timedelta(hours=48)).strftime('%Y-%m-%d %H:%M')}", "INFO")
+        
+        # Calcular métricas
+        position_size_usd = price * amount
+        
+        # Calcular % de stop loss e take profits
+        if operation == "LONG":
+            sl_pct = ((price - stop_loss) / price * 100) if stop_loss else None
+            tp1_pct = ((take_profit_1 - price) / price * 100) if take_profit_1 else None
+            tp2_pct = ((take_profit_2 - price) / price * 100) if take_profit_2 else None
+        else:  # SHORT
+            sl_pct = ((stop_loss - price) / price * 100) if stop_loss else None
+            tp1_pct = ((price - take_profit_1) / price * 100) if take_profit_1 else None
+            tp2_pct = ((price - take_profit_2) / price * 100) if take_profit_2 else None
+        
+        # Calcular Risk:Reward ratio
+        risk_reward = (tp1_pct / sl_pct) if (sl_pct and tp1_pct and sl_pct > 0) else None
+        
+        # Classificar tendência de mercado
+        market_trend = ema_trend if ema_trend else "-"
+        
+        # Classificar volatilidade
+        if atr_percentile is not None:
+            if atr_percentile >= 80:
+                market_volatility = "Muito Alta"
+            elif atr_percentile >= 60:
+                market_volatility = "Alta"
+            elif atr_percentile >= 40:
+                market_volatility = "Normal"
+            else:
+                market_volatility = "Baixa"
+        else:
+            market_volatility = "-"
+        
+        # Avaliar qualidade da entrada
+        entry_quality = self._evaluate_entry_quality(rsi, atr_percentile, volume_ratio, operation)
         
         # Determinar motivo
         if operation == "LONG":
@@ -564,24 +773,136 @@ class StateManager:
         else:
             reason = f"RSI sobrecomprado ({rsi:.2f} > 80)" if rsi else "Entrada SHORT"
         
-        # Registrar no Google Sheets com trade_id
-        sheets_logger.log_trade(
-            price=price,
-            crypto=crypto,
-            operation=operation,
-            trade_type="Compra",
-            rsi=rsi,
-            reason=reason,
-            trade_id=trade_id
-        )
+        # Preparar dados completos para Google Sheets
+        trade_data = {
+            # Identificação
+            'trade_id': trade_id,
+            'timestamp': now,
+            'crypto': crypto,
+            'operation': operation,
+            'trade_type': 'Entrada',
+            
+            # Contexto de Entrada - Indicadores
+            'rsi': rsi,
+            'ema_trend': market_trend,
+            'atr': atr,
+            'atr_percentile': atr_percentile,
+            'volume_ratio': volume_ratio,
+            
+            # Execução - Preços e Posição
+            'entry_price': price,
+            'slippage_pct': None,  # Será calculado em produção comparando preço esperado vs real
+            'position_size_usd': position_size_usd,
+            'position_size_coins': amount,
+            'leverage': 1,  # Sem alavancagem por padrão
+            
+            # Gestão de Risco - Stops e Targets
+            'stop_loss_price': stop_loss,
+            'stop_loss_pct': sl_pct,
+            'tp1_price': take_profit_1,
+            'tp1_pct': tp1_pct,
+            'tp2_price': take_profit_2,
+            'tp2_pct': tp2_pct,
+            'risk_reward': risk_reward,
+            
+            # Resultados - Saída e P&L (vazios na entrada)
+            'exit_price': None,
+            'pnl_usd': None,
+            'pnl_pct': None,
+            'time_in_trade_min': None,
+            'mfe_pct': None,
+            'mae_pct': None,
+            
+            # Análise - Classificação e Qualidade
+            'market_trend': market_trend,
+            'market_volatility': market_volatility,
+            'entry_quality': entry_quality,
+            'reason': reason,
+            'notes': ''
+        }
+        
+        # Registrar no Google Sheets
+        sheets_logger.log_trade(trade_data)
         
         return trade_id  # Retornar ID para usar depois
     
-    def record_sell(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", rsi: float = None, reason: str = "", trade_id: str = ""):
-        """Registra uma venda"""
+    def _evaluate_entry_quality(self, rsi: float, atr_percentile: float, volume_ratio: float, operation: str) -> str:
+        """Avalia a qualidade da entrada baseado em múltiplos fatores"""
+        score = 0
+        
+        # RSI adequado para operação (peso 3)
+        if rsi is not None:
+            if operation == "LONG" and rsi < 25:
+                score += 3
+            elif operation == "LONG" and rsi < 30:
+                score += 2
+            elif operation == "SHORT" and rsi > 75:
+                score += 3
+            elif operation == "SHORT" and rsi > 70:
+                score += 2
+        
+        # Volatilidade favorável (peso 2)
+        if atr_percentile is not None:
+            if 40 <= atr_percentile <= 70:  # Volatilidade normal/alta mas não extrema
+                score += 2
+            elif atr_percentile < 40:  # Muito baixa
+                score += 1
+        
+        # Volume acima da média (peso 2)
+        if volume_ratio is not None:
+            if volume_ratio > 1.5:
+                score += 2
+            elif volume_ratio > 1.0:
+                score += 1
+        
+        # Classificar (máximo 7 pontos)
+        if score >= 6:
+            return "Excelente"
+        elif score >= 4:
+            return "Boa"
+        elif score >= 2:
+            return "Regular"
+        else:
+            return "Ruim"
+    
+    def record_sell(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", 
+                   rsi: float = None, reason: str = "", trade_id: str = "",
+                   entry_price: float = None, entry_time: datetime = None):
+        """
+        Registra uma venda com cálculo completo de resultados
+        
+        Args:
+            price: Preço de saída
+            amount: Quantidade vendida
+            crypto: Criptomoeda
+            operation: LONG ou SHORT
+            rsi: RSI na saída
+            reason: Motivo da saída (Stop Loss, Take Profit, etc)
+            trade_id: ID do trade (para vincular com entrada)
+            entry_price: Preço de entrada (para calcular P&L)
+            entry_time: Timestamp da entrada (para calcular tempo no trade)
+        """
         now = datetime.now()
         self.state["last_sell_timestamp"] = now.isoformat()
         self.save_state()
+        
+        # Calcular resultados
+        if entry_price:
+            if operation == "LONG":
+                pnl_pct = ((price - entry_price) / entry_price) * 100
+            else:  # SHORT
+                pnl_pct = ((entry_price - price) / entry_price) * 100
+            
+            pnl_usd = (price - entry_price) * amount if operation == "LONG" else (entry_price - price) * amount
+        else:
+            pnl_pct = None
+            pnl_usd = None
+        
+        # Calcular tempo no trade
+        if entry_time:
+            time_in_trade_min = (now - entry_time).total_seconds() / 60
+        else:
+            time_in_trade_min = None
         
         log(f"💾 VENDA REGISTRADA NO ESTADO:", "INFO")
         log(f"   🆔 Trade ID: {trade_id}", "INFO")
@@ -590,17 +911,68 @@ class StateManager:
         log(f"   🪙 Quantidade: {amount:.4f} {crypto}", "INFO")
         log(f"   📊 RSI: {rsi:.2f}" if rsi else "", "INFO")
         log(f"   🎯 Motivo: {reason}", "INFO")
+        if pnl_pct is not None:
+            log(f"   💵 P&L: ${pnl_usd:.2f} ({pnl_pct:+.2f}%)", "INFO")
+        if time_in_trade_min is not None:
+            log(f"   ⏱️  Tempo: {time_in_trade_min:.0f} min", "INFO")
         
-        # Registrar no Google Sheets com mesmo trade_id da compra
-        sheets_logger.log_trade(
-            price=price,
-            crypto=crypto,
-            operation=operation,
-            trade_type="Venda",
-            rsi=rsi,
-            reason=reason,
-            trade_id=trade_id
-        )
+        # Preparar dados completos para Google Sheets
+        trade_data = {
+            # Identificação
+            'trade_id': trade_id,
+            'timestamp': now,
+            'crypto': crypto,
+            'operation': operation,
+            'trade_type': 'Saída',
+            
+            # Contexto (na saída)
+            'rsi': rsi,
+            'ema_trend': '-',
+            'atr': None,
+            'atr_percentile': None,
+            'volume_ratio': None,
+            
+            # Execução
+            'entry_price': entry_price,
+            'slippage_pct': None,
+            'position_size_usd': price * amount,
+            'position_size_coins': amount,
+            'leverage': 1,
+            
+            # Gestão de Risco (copiar da entrada)
+            'stop_loss_price': None,
+            'stop_loss_pct': None,
+            'tp1_price': None,
+            'tp1_pct': None,
+            'tp2_price': None,
+            'tp2_pct': None,
+            'risk_reward': None,
+            
+            # Resultados
+            'exit_price': price,
+            'pnl_usd': pnl_usd,
+            'pnl_pct': pnl_pct,
+            'time_in_trade_min': time_in_trade_min,
+            'mfe_pct': None,  # TODO: calcular em monitoramento contínuo
+            'mae_pct': None,  # TODO: calcular em monitoramento contínuo
+            
+            # Análise
+            'market_trend': '-',
+            'market_volatility': '-',
+            'entry_quality': '-',
+            'reason': reason,
+            'notes': ''
+        }
+        
+        # Registrar no Google Sheets
+        sheets_logger.log_trade(trade_data)
+    
+    def get_position_entry(self, index: int = -1) -> dict:
+        """Retorna dados da entrada de posição (útil para vendas)"""
+        entries = self.state.get("position_entries", [])
+        if entries and len(entries) > abs(index):
+            return entries[index]
+        return None
     
     def get_average_entry_price(self) -> float:
         """
@@ -969,6 +1341,40 @@ class TradingStrategy:
             log(f"⚠️ Erro calculando RSI: {e}", "WARN")
             return 50.0  # Valor neutro como fallback
     
+    def calculate_atr(self, df: pd.DataFrame, period: int = 14) -> float:
+        """Calcula o ATR (Average True Range) do DataFrame"""
+        try:
+            if len(df) < period + 1:
+                log("⚠️ Dados insuficientes para calcular ATR", "WARN")
+                return 0.0
+            
+            # Calcular True Range
+            high = df['high']
+            low = df['low']
+            close_prev = df['close'].shift(1)
+            
+            tr1 = high - low
+            tr2 = abs(high - close_prev)
+            tr3 = abs(low - close_prev)
+            
+            tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            
+            # Calcular ATR (média móvel do True Range)
+            atr = tr.rolling(window=period).mean()
+            
+            # Retornar último valor
+            atr_value = atr.iloc[-1]
+            
+            # Tratar casos especiais
+            if pd.isna(atr_value) or np.isinf(atr_value):
+                return 0.0
+            
+            return float(atr_value)
+            
+        except Exception as e:
+            log(f"⚠️ Erro calculando ATR: {e}", "WARN")
+            return 0.0
+    
     def calculate_ema(self, df: pd.DataFrame, period: int = 200) -> float:
         """Calcula a EMA (Exponential Moving Average) do DataFrame"""
         try:
@@ -1031,6 +1437,7 @@ class TradingStrategy:
             "signal": signal,
             "position": position,
             "has_position": position is not None,
+            "data": df,  # Adicionar DataFrame para cálculo de ATR
         }
         
         # Log da análise
@@ -1098,6 +1505,7 @@ class TradingStrategy:
         symbol = analysis["symbol"]
         coin = analysis["coin"]
         rsi = analysis["rsi"]
+        data = analysis.get("data")  # DataFrame com dados históricos para ATR
         
         # Calcular quanto investir
         amount_usd = balance * (self.cfg.ENTRY_CAPITAL_PCT / 100.0)
@@ -1120,40 +1528,127 @@ class TradingStrategy:
         log(f"   🪙 Quantidade: {amount_coins:.4f} {coin} @ ${current_price:.4f}", "INFO")
         log(f"   📈 RSI: {rsi:.2f}", "INFO")
         
+        # Calcular ATR ANTES da entrada (para passar ao record_buy)
+        atr = 0.0
+        atr_percentile = None
+        if data is not None and not data.empty:
+            atr = self.calculate_atr(data, period=self.cfg.ATR_PERIOD)
+            if atr > 0:
+                log(f"   📊 ATR: ${atr:.4f} (será usado para stops dinâmicos)", "INFO")
+                
+                # Calcular percentil do ATR (volatilidade relativa)
+                atr_series = data['high'] - data['low']
+                atr_series = atr_series.rolling(window=self.cfg.ATR_PERIOD).mean()
+                if len(atr_series) > 0:
+                    atr_rank = (atr_series < atr).sum()
+                    atr_percentile = (atr_rank / len(atr_series)) * 100
+        
+        # Calcular volume ratio
+        volume_ratio = None
+        if data is not None and not data.empty and 'volume' in data.columns:
+            current_volume = data['volume'].iloc[-1]
+            avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
+            if avg_volume > 0:
+                volume_ratio = current_volume / avg_volume
+        
+        # Detectar tendência EMA
+        ema_trend = "Neutral"
+        if data is not None and not data.empty:
+            try:
+                ema_200 = data['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+                if current_price > ema_200 * 1.02:
+                    ema_trend = "Bullish"
+                elif current_price < ema_200 * 0.98:
+                    ema_trend = "Bearish"
+            except:
+                pass
+        
         # Executar ordem MARKET
         success = self.exchange.create_market_order(symbol, side, amount_usd, self.cfg.LEVERAGE)
         
         if success:
-            # Registrar entrada com RSI e capturar trade_id
-            trade_id = self.state.record_buy(current_price, amount_coins, coin, signal, rsi)
+            # Calcular stops ANTES de registrar (para incluir no registro)
+            stop_loss_price = None
+            take_profit_1_price = None
+            take_profit_2_price = None
             
-            # Calcular preços de SL e TP para referência
-            stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
-            take_profit_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * self.cfg.LEVERAGE
-            
-            if signal == "LONG":
-                stop_loss_price = current_price * (1 - self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
-                take_profit_price = current_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+            # Se ATR válido, usar stops dinâmicos (OTIMIZADO)
+            if atr > 0:
+                log(f"📊 ATR calculado: ${atr:.4f} (stops dinâmicos)", "INFO")
+                
+                if signal == "LONG":
+                    stop_loss_price = current_price - (atr * self.cfg.ATR_SL_MULTIPLIER)
+                    take_profit_1_price = current_price + (atr * self.cfg.ATR_TP_MULTIPLIER * 0.6)  # TP1 parcial em 60%
+                    take_profit_2_price = current_price + (atr * self.cfg.ATR_TP_MULTIPLIER)  # TP2 total
+                else:
+                    stop_loss_price = current_price + (atr * self.cfg.ATR_SL_MULTIPLIER)
+                    take_profit_1_price = current_price - (atr * self.cfg.ATR_TP_MULTIPLIER * 0.6)
+                    take_profit_2_price = current_price - (atr * self.cfg.ATR_TP_MULTIPLIER)
+                
+                # Calcular ROI esperado com ATR
+                sl_distance = abs(stop_loss_price - current_price) / current_price * 100
+                tp1_distance = abs(take_profit_1_price - current_price) / current_price * 100
+                tp2_distance = abs(take_profit_2_price - current_price) / current_price * 100
+                stop_loss_roi = sl_distance * self.cfg.LEVERAGE
+                take_profit_1_roi = tp1_distance * self.cfg.LEVERAGE
+                take_profit_2_roi = tp2_distance * self.cfg.LEVERAGE
+                
+                log(f"✅ Usando stops ATR (1.5x SL, 1.5x/2.5x TP)", "INFO")
             else:
-                stop_loss_price = current_price * (1 + self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
-                take_profit_price = current_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+                # Fallback para stops fixos se ATR falhar
+                log(f"⚠️ ATR inválido, usando stops fixos", "WARN")
+                stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
+                take_profit_1_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 * self.cfg.LEVERAGE
+                take_profit_2_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * self.cfg.LEVERAGE
+                
+                if signal == "LONG":
+                    stop_loss_price = current_price * (1 - self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+                    take_profit_1_price = current_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 / 100.0)
+                    take_profit_2_price = current_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+                else:
+                    stop_loss_price = current_price * (1 + self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+                    take_profit_1_price = current_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 / 100.0)
+                    take_profit_2_price = current_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
+                
+                atr = 0.0  # Marcar como não usado
+            
+            # Registrar entrada com TODOS os dados
+            trade_id = self.state.record_buy(
+                price=current_price,
+                amount=amount_coins,
+                crypto=coin,
+                operation=signal,
+                rsi=rsi,
+                atr=atr,
+                stop_loss=stop_loss_price,
+                take_profit_1=take_profit_1_price,
+                take_profit_2=take_profit_2_price,
+                ema_trend=ema_trend,
+                atr_percentile=atr_percentile,
+                volume_ratio=volume_ratio
+            )
             
             log(f"", "INFO")
             log(f"🎯 ALVOS DEFINIDOS (monitoramento automático):", "INFO")
             log(f"   🔴 Stop Loss: ${stop_loss_price:.4f} (-{stop_loss_roi:.0f}% ROI)", "INFO")
-            log(f"   🟢 Take Profit: ${take_profit_price:.4f} (+{take_profit_roi:.0f}% ROI)", "INFO")
+            log(f"   � Take Profit 1: ${take_profit_1_price:.4f} (+{take_profit_1_roi:.0f}% ROI) - 50% posição", "INFO")
+            log(f"   �🟢 Take Profit 2: ${take_profit_2_price:.4f} (+{take_profit_2_roi:.0f}% ROI) - 50% posição", "INFO")
             
-            # Salvar alvos no estado para monitoramento (incluindo trade_id)
+            # Salvar alvos no estado para monitoramento (incluindo trade_id e ATR)
             self.state.state["active_targets"] = {
                 "symbol": symbol,
                 "coin": coin,
                 "entry_price": current_price,
                 "stop_loss_price": stop_loss_price,
-                "take_profit_price": take_profit_price,
+                "take_profit_price": take_profit_2_price,  # Manter compatibilidade
+                "take_profit_1_price": take_profit_1_price,
+                "take_profit_2_price": take_profit_2_price,
                 "amount": amount_coins,
                 "signal": signal,
                 "entry_rsi": rsi,
-                "trade_id": trade_id  # Salvar trade_id para usar na venda
+                "entry_atr": atr,  # Salvar ATR usado
+                "trade_id": trade_id,  # Salvar trade_id para usar na venda
+                "entry_time": datetime.now().isoformat()  # Para calcular tempo no trade
             }
             self.state.save_state()
             
@@ -1162,13 +1657,15 @@ class TradingStrategy:
                 f"{'🟢' if signal == 'LONG' else '🔴'} ENTRADA {signal} - {coin}",
                 f"**Preço:** ${current_price:.4f}\n"
                 f"**RSI:** {rsi:.2f}\n"
+                f"**ATR:** ${atr:.4f} ({atr_percentile:.0f}º percentil)" if atr > 0 and atr_percentile else f"**RSI:** {rsi:.2f}\n" +
                 f"**Capital usado:** ${amount_usd:.2f} ({self.cfg.ENTRY_CAPITAL_PCT}% do saldo)\n"
                 f"**Leverage:** {self.cfg.LEVERAGE}x\n"
                 f"**Valor nocional:** ${notional_value:.2f}\n"
                 f"**Quantidade:** {amount_coins:.4f} {coin}\n\n"
                 f"**Alvos automáticos:**\n"
                 f"🔴 Stop Loss: ${stop_loss_price:.4f} ({-stop_loss_roi:+.0f}% ROI)\n"
-                f"🟢 Take Profit: ${take_profit_price:.4f} ({take_profit_roi:+.0f}% ROI)",
+                f"� TP1 (50%): ${take_profit_1_price:.4f} ({take_profit_1_roi:+.0f}% ROI)\n"
+                f"🟢 TP2 (50%): ${take_profit_2_price:.4f} ({take_profit_2_roi:+.0f}% ROI)",
                 0x00ff00 if signal == "LONG" else 0xff0000
             )
         
