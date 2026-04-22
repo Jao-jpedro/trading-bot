@@ -2095,8 +2095,10 @@ def main():
     log(f"   Entrada SHORT: RSI > {cfg.RSI_SHORT_THRESHOLD} (sobrecomprado)", "INFO")
     log(f"   Capital por entrada: {cfg.ENTRY_CAPITAL_PCT}%", "INFO")
     log(f"   Cooldown entrada: {cfg.ENTRY_COOLDOWN_HOURS}h (2 dias)", "INFO")
-    log(f"   Stop Loss: {cfg.STOP_LOSS_PRICE_PCT:.1f}% preço = 10% ROI", "INFO")
-    log(f"   Take Profit: {cfg.TAKE_PROFIT_PRICE_PCT:.1f}% preço = 20% ROI", "INFO")
+    log(f"   Stop Loss: ATR dinâmico (1.5x) ou {cfg.STOP_LOSS_PRICE_PCT:.1f}% fixo", "INFO")
+    log(f"   Take Profit 1: {cfg.TAKE_PROFIT_1_PCT:.1f}% (vende {cfg.TP1_SELL_PCT:.0f}%)", "INFO")
+    log(f"   Take Profit 2: {cfg.TAKE_PROFIT_2_PCT:.1f}% (vende 100%)", "INFO")
+    log(f"   Breakeven após TP1: {'Sim' if cfg.MOVE_SL_TO_BREAKEVEN else 'Não'}", "INFO")
     
     # Criar estratégia
     strategy = TradingStrategy(cfg)
