@@ -471,15 +471,20 @@ class TradingConfig:
     ENTRY_CAPITAL_PCT: float = 25.0   # Usa 25% do capital por entrada (conservador)
     ENTRY_COOLDOWN_HOURS: int = 48    # Cooldown de 48h entre entradas no mesmo asset
     
-    # Estratégia de SAÍDA - OTIMIZADA COM ATR
-    # ATR (Average True Range) torna stops dinâmicos baseados na volatilidade
+    # Estratégia de SAÍDA - OTIMIZADA
     ATR_PERIOD: int = 14                 # Período para calcular ATR
     ATR_SL_MULTIPLIER: float = 1.5       # Stop Loss = 1.5x ATR (adaptativo)
-    ATR_TP_MULTIPLIER: float = 2.5       # Take Profit = 2.5x ATR (R:R = 1.67:1)
     
-    # Manter compatibilidade com stops fixos (fallback se ATR falhar)
-    STOP_LOSS_PRICE_PCT: float = 2.0     # Fallback: 2% no preço
-    TAKE_PROFIT_PRICE_PCT: float = 4.0   # Fallback: 4% no preço
+    # TAKE PROFITS FIXOS (conforme especificação)
+    TAKE_PROFIT_1_PCT: float = 10.0      # TP1: 10% fixo (vende 50% da posição)
+    TAKE_PROFIT_2_PCT: float = 20.0      # TP2: 20% fixo (vende 100% - toda a posição)
+    
+    # Fallback apenas para stop loss
+    STOP_LOSS_PRICE_PCT: float = 2.0     # Fallback: 2% no preço se ATR falhar
+    
+    # Gestão de saída parcial
+    TP1_SELL_PCT: float = 50.0           # Vende 50% no TP1
+    MOVE_SL_TO_BREAKEVEN: bool = True    # Move SL para breakeven após TP1
     
     # Gestão de capital
     MIN_ORDER_USD: float = 10.0  # Mínimo $10 para ordem Hyperliquid
@@ -646,6 +651,10 @@ class StateManager:
                 log(f"✅ Última venda: {last_sell_time.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
             
             self.save_state()
+            
+            # NOVO: Reconstruir alvos (stop loss e take profit) se necessário
+            self.reconstruct_targets_if_needed()
+            
             return True
             
         except Exception as e:
@@ -653,6 +662,114 @@ class StateManager:
             import traceback
             log(traceback.format_exc(), "DEBUG")
             return False
+    
+    def reconstruct_targets_if_needed(self):
+        """
+        Reconstrói os alvos de saída (stop loss e take profit) quando:
+        - Há posição aberta
+        - Mas não há targets salvos (active_targets vazio)
+        
+        Isso acontece quando o bot reinicia após uma entrada.
+        """
+        try:
+            # Verificar se já tem targets configurados
+            if self.state.get("active_targets"):
+                log("✅ Alvos de saída já configurados", "DEBUG")
+                return
+            
+            # Verificar se há entradas de posição
+            entries = self.state.get("position_entries", [])
+            if not entries:
+                log("ℹ️  Sem posição aberta, não há alvos para reconstruir", "DEBUG")
+                return
+            
+            # Pegar dados da última entrada
+            last_entry = entries[-1]
+            entry_price = last_entry.get("price")
+            amount = sum(e.get("amount", 0) for e in entries)
+            operation = last_entry.get("operation", "LONG")
+            atr = last_entry.get("atr")
+            trade_id = last_entry.get("trade_id")
+            
+            if not entry_price or not amount:
+                log("⚠️ Dados de entrada incompletos, não é possível reconstruir alvos", "WARN")
+                return
+            
+            log("🔧 Reconstruindo alvos de saída...", "INFO")
+            log(f"   📊 Preço de entrada: ${entry_price:.4f}", "INFO")
+            log(f"   🪙 Quantidade: {amount:.4f}", "INFO")
+            log(f"   📈 Operação: {operation}", "INFO")
+            
+            # Calcular Stop Loss usando ATR se disponível, senão usar fixo
+            if atr and atr > 0:
+                log(f"   📊 ATR salvo: ${atr:.4f}", "INFO")
+                
+                # Importar configuração
+                from dataclasses import fields
+                cfg_fields = {f.name: f.default for f in fields(TradingConfig)}
+                atr_sl_mult = cfg_fields.get('ATR_SL_MULTIPLIER', 1.5)
+                
+                if operation == "LONG":
+                    stop_loss_price = entry_price - (atr * atr_sl_mult)
+                else:  # SHORT
+                    stop_loss_price = entry_price + (atr * atr_sl_mult)
+                
+                log(f"   ✅ Usando Stop Loss dinâmico (ATR SL: {atr_sl_mult}x)", "INFO")
+            else:
+                log(f"   ⚠️ ATR não disponível, usando Stop Loss fixo (2%)", "WARN")
+                
+                if operation == "LONG":
+                    stop_loss_price = entry_price * 0.98  # -2%
+                else:  # SHORT
+                    stop_loss_price = entry_price * 1.02  # +2%
+            
+            # Calcular Take Profits FIXOS (10% e 20%)
+            if operation == "LONG":
+                take_profit_1_price = entry_price * 1.10  # +10%
+                take_profit_2_price = entry_price * 1.20  # +20%
+            else:  # SHORT
+                take_profit_1_price = entry_price * 0.90  # -10%
+                take_profit_2_price = entry_price * 0.80  # -20%
+            
+            log(f"   ✅ Usando Take Profits FIXOS (TP1: 10%, TP2: 20%)", "INFO")
+            
+            # Determinar símbolo (assumir SOL se não especificado)
+            symbol = "SOL/USDC:USDC"  # Default
+            coin = "SOL"
+            
+            # Salvar targets reconstruídos com os novos campos
+            self.state["active_targets"] = {
+                "symbol": symbol,
+                "coin": coin,
+                "entry_price": entry_price,
+                "stop_loss_price": stop_loss_price,
+                "take_profit_price": take_profit_2_price,  # Compatibilidade
+                "take_profit_1_price": take_profit_1_price,
+                "take_profit_2_price": take_profit_2_price,
+                "amount": amount,
+                "amount_remaining": amount,  # NOVO: quantidade restante
+                "signal": operation,
+                "entry_rsi": last_entry.get("rsi"),
+                "entry_atr": atr,
+                "trade_id": trade_id or f"{coin}_RECONSTRUCTED",
+                "entry_time": last_entry.get("timestamp", datetime.now().isoformat()),
+                "tp1_hit": False,  # NOVO: controle de TP1
+                "breakeven_set": False,  # NOVO: controle de breakeven
+                "reconstructed": True  # Flag para indicar que foi reconstruído
+            }
+            
+            self.save_state()
+            
+            log(f"✅ ALVOS RECONSTRUÍDOS:", "INFO")
+            log(f"   🔴 Stop Loss: ${stop_loss_price:.4f}", "INFO")
+            log(f"   🟡 Take Profit 1 (50% @ 10%): ${take_profit_1_price:.4f}", "INFO")
+            log(f"   🟢 Take Profit 2 (100% @ 20%): ${take_profit_2_price:.4f}", "INFO")
+            log(f"   💡 Monitoramento ativo a partir de agora", "INFO")
+            
+        except Exception as e:
+            log(f"❌ Erro reconstruindo targets: {e}", "ERROR")
+            import traceback
+            log(traceback.format_exc(), "DEBUG")
     
     def save_state(self):
         """Salva estado no arquivo JSON"""
@@ -1572,45 +1689,41 @@ class TradingStrategy:
             take_profit_1_price = None
             take_profit_2_price = None
             
-            # Se ATR válido, usar stops dinâmicos (OTIMIZADO)
+            # Stop Loss: usar ATR se disponível, senão fixo
             if atr > 0:
-                log(f"📊 ATR calculado: ${atr:.4f} (stops dinâmicos)", "INFO")
+                log(f"📊 ATR calculado: ${atr:.4f} (stop loss dinâmico)", "INFO")
                 
                 if signal == "LONG":
                     stop_loss_price = current_price - (atr * self.cfg.ATR_SL_MULTIPLIER)
-                    take_profit_1_price = current_price + (atr * self.cfg.ATR_TP_MULTIPLIER * 0.6)  # TP1 parcial em 60%
-                    take_profit_2_price = current_price + (atr * self.cfg.ATR_TP_MULTIPLIER)  # TP2 total
                 else:
                     stop_loss_price = current_price + (atr * self.cfg.ATR_SL_MULTIPLIER)
-                    take_profit_1_price = current_price - (atr * self.cfg.ATR_TP_MULTIPLIER * 0.6)
-                    take_profit_2_price = current_price - (atr * self.cfg.ATR_TP_MULTIPLIER)
                 
-                # Calcular ROI esperado com ATR
                 sl_distance = abs(stop_loss_price - current_price) / current_price * 100
-                tp1_distance = abs(take_profit_1_price - current_price) / current_price * 100
-                tp2_distance = abs(take_profit_2_price - current_price) / current_price * 100
                 stop_loss_roi = sl_distance * self.cfg.LEVERAGE
-                take_profit_1_roi = tp1_distance * self.cfg.LEVERAGE
-                take_profit_2_roi = tp2_distance * self.cfg.LEVERAGE
                 
-                log(f"✅ Usando stops ATR (1.5x SL, 1.5x/2.5x TP)", "INFO")
+                log(f"✅ Stop Loss dinâmico (ATR 1.5x): ${stop_loss_price:.4f} (-{stop_loss_roi:.1f}%)", "INFO")
             else:
-                # Fallback para stops fixos se ATR falhar
-                log(f"⚠️ ATR inválido, usando stops fixos", "WARN")
-                stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
-                take_profit_1_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 * self.cfg.LEVERAGE
-                take_profit_2_roi = self.cfg.TAKE_PROFIT_PRICE_PCT * self.cfg.LEVERAGE
+                log(f"⚠️ ATR inválido, usando stop loss fixo (2%)", "WARN")
                 
                 if signal == "LONG":
                     stop_loss_price = current_price * (1 - self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
-                    take_profit_1_price = current_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 / 100.0)
-                    take_profit_2_price = current_price * (1 + self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
                 else:
                     stop_loss_price = current_price * (1 + self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
-                    take_profit_1_price = current_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT * 0.5 / 100.0)
-                    take_profit_2_price = current_price * (1 - self.cfg.TAKE_PROFIT_PRICE_PCT / 100.0)
                 
-                atr = 0.0  # Marcar como não usado
+                stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
+            
+            # Take Profits: SEMPRE FIXOS em 10% e 20%
+            if signal == "LONG":
+                take_profit_1_price = current_price * (1 + self.cfg.TAKE_PROFIT_1_PCT / 100.0)  # +10%
+                take_profit_2_price = current_price * (1 + self.cfg.TAKE_PROFIT_2_PCT / 100.0)  # +20%
+            else:  # SHORT
+                take_profit_1_price = current_price * (1 - self.cfg.TAKE_PROFIT_1_PCT / 100.0)  # -10%
+                take_profit_2_price = current_price * (1 - self.cfg.TAKE_PROFIT_2_PCT / 100.0)  # -20%
+            
+            take_profit_1_roi = self.cfg.TAKE_PROFIT_1_PCT * self.cfg.LEVERAGE
+            take_profit_2_roi = self.cfg.TAKE_PROFIT_2_PCT * self.cfg.LEVERAGE
+            
+            log(f"✅ Take Profits FIXOS: TP1=10% (50% posição), TP2=20% (50% posição)", "INFO")
             
             # Registrar entrada com TODOS os dados
             trade_id = self.state.record_buy(
@@ -1634,7 +1747,7 @@ class TradingStrategy:
             log(f"   � Take Profit 1: ${take_profit_1_price:.4f} (+{take_profit_1_roi:.0f}% ROI) - 50% posição", "INFO")
             log(f"   �🟢 Take Profit 2: ${take_profit_2_price:.4f} (+{take_profit_2_roi:.0f}% ROI) - 50% posição", "INFO")
             
-            # Salvar alvos no estado para monitoramento (incluindo trade_id e ATR)
+            # Salvar alvos no estado para monitoramento (incluindo controle de TP1)
             self.state.state["active_targets"] = {
                 "symbol": symbol,
                 "coin": coin,
@@ -1644,11 +1757,14 @@ class TradingStrategy:
                 "take_profit_1_price": take_profit_1_price,
                 "take_profit_2_price": take_profit_2_price,
                 "amount": amount_coins,
+                "amount_remaining": amount_coins,  # NOVO: rastrear quantidade restante
                 "signal": signal,
                 "entry_rsi": rsi,
-                "entry_atr": atr,  # Salvar ATR usado
-                "trade_id": trade_id,  # Salvar trade_id para usar na venda
-                "entry_time": datetime.now().isoformat()  # Para calcular tempo no trade
+                "entry_atr": atr,
+                "trade_id": trade_id,
+                "entry_time": datetime.now().isoformat(),
+                "tp1_hit": False,  # NOVO: controle se TP1 já foi atingido
+                "breakeven_set": False  # NOVO: controle se SL foi movido para breakeven
             }
             self.state.save_state()
             
@@ -1675,6 +1791,7 @@ class TradingStrategy:
         """
         Monitora posições ativas e executa saídas quando atingem Stop Loss ou Take Profit.
         Sistema controlado pelo bot (não pela exchange).
+        Com suporte a TP1 parcial (50%), TP2 total, e breakeven após TP1.
         """
         # Verificar se há posição ativa
         active = self.state.state.get("active_targets")
@@ -1685,13 +1802,17 @@ class TradingStrategy:
         coin = active.get("coin")
         entry_price = active.get("entry_price")
         stop_loss_price = active.get("stop_loss_price")
-        take_profit_price = active.get("take_profit_price")
-        amount = active.get("amount")
+        take_profit_1_price = active.get("take_profit_1_price")  # TP1: 10%
+        take_profit_2_price = active.get("take_profit_2_price")  # TP2: 20%
+        amount_remaining = active.get("amount_remaining")  # Quantidade restante
         signal = active.get("signal")
         entry_rsi = active.get("entry_rsi")
         trade_id = active.get("trade_id")
+        tp1_hit = active.get("tp1_hit", False)  # Controle de TP1
+        breakeven_set = active.get("breakeven_set", False)  # Controle de breakeven
         
-        if not all([symbol, coin, entry_price, stop_loss_price, take_profit_price, amount, signal, trade_id]):
+        if not all([symbol, coin, entry_price, stop_loss_price, take_profit_1_price, 
+                    take_profit_2_price, amount_remaining, signal, trade_id]):
             log("⚠️ Dados incompletos em active_targets, ignorando monitoramento", "WARN")
             return
         
@@ -1708,38 +1829,129 @@ class TradingStrategy:
             
             roi_current = price_change_pct * self.cfg.LEVERAGE
             
-            # Verificar se atingiu Stop Loss ou Take Profit
-            hit_stop_loss = False
-            hit_take_profit = False
+            # ============================================================
+            # LÓGICA DE TP1 (10% - vende 50% da posição)
+            # ============================================================
+            if not tp1_hit:
+                hit_tp1 = False
+                if signal == "LONG":
+                    if current_price >= take_profit_1_price:
+                        hit_tp1 = True
+                else:  # SHORT
+                    if current_price <= take_profit_1_price:
+                        hit_tp1 = True
+                
+                if hit_tp1:
+                    log(f"🎯 TP1 (10%) atingido para {coin}!", "INFO")
+                    log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
+                    log(f"   💰 Preço TP1: ${current_price:.4f}", "INFO")
+                    log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
+                    
+                    # Vender 50% da posição
+                    amount_to_sell = amount_remaining * 0.5
+                    exit_side = "sell" if signal == "LONG" else "buy"
+                    amount_usd = amount_to_sell * current_price
+                    
+                    success = self.exchange.create_market_order(
+                        symbol,
+                        exit_side,
+                        amount_usd,
+                        self.cfg.LEVERAGE
+                    )
+                    
+                    if success:
+                        # Registrar venda parcial no Google Sheets
+                        self.state.record_sell(
+                            current_price,
+                            amount_to_sell,
+                            coin,
+                            signal,
+                            rsi=None,
+                            reason="Take Profit 1 (50%)",
+                            trade_id=trade_id
+                        )
+                        
+                        # Notificar Discord
+                        discord.send(
+                            f"🎯 TP1 EXECUTADO - {coin}",
+                            f"**Preço de entrada:** ${entry_price:.4f}\n"
+                            f"**Preço TP1:** ${current_price:.4f}\n"
+                            f"**Quantidade vendida:** {amount_to_sell:.4f} {coin} (50%)\n"
+                            f"**Quantidade restante:** {amount_remaining - amount_to_sell:.4f} {coin}\n"
+                            f"**Operação:** {signal}\n"
+                            f"**ROI:** {roi_current:+.2f}%\n"
+                            f"**Trade ID:** {trade_id}",
+                            0x00ff00
+                        )
+                        
+                        # Atualizar estado: marcar TP1 como executado
+                        self.state.state["active_targets"]["tp1_hit"] = True
+                        self.state.state["active_targets"]["amount_remaining"] = amount_remaining - amount_to_sell
+                        
+                        # MOVER STOP LOSS PARA BREAKEVEN
+                        if self.cfg.MOVE_SL_TO_BREAKEVEN:
+                            old_sl = stop_loss_price
+                            self.state.state["active_targets"]["stop_loss_price"] = entry_price
+                            self.state.state["active_targets"]["breakeven_set"] = True
+                            self.state.save_state()
+                            
+                            log(f"🔒 Stop Loss movido para BREAKEVEN: ${old_sl:.4f} → ${entry_price:.4f}", "INFO")
+                            discord.send(
+                                f"🔒 STOP LOSS MOVIDO PARA BREAKEVEN - {coin}",
+                                f"**Stop Loss anterior:** ${old_sl:.4f}\n"
+                                f"**Novo Stop Loss (breakeven):** ${entry_price:.4f}\n"
+                                f"**Trade ID:** {trade_id}",
+                                0xffff00
+                            )
+                        else:
+                            self.state.save_state()
+                        
+                        log(f"✅ TP1 executado! 50% vendido, SL movido para breakeven", "INFO")
+                        return  # Sair para evitar checar TP2/SL no mesmo ciclo
+                    else:
+                        log(f"❌ Erro ao executar TP1 para {coin}", "ERROR")
+                        return
             
+            # ============================================================
+            # LÓGICA DE TP2 (20% - vende 100% da posição total)
+            # ============================================================
+            hit_tp2 = False
             if signal == "LONG":
-                # LONG: SL abaixo, TP acima
+                if current_price >= take_profit_2_price:
+                    hit_tp2 = True
+            else:  # SHORT
+                if current_price <= take_profit_2_price:
+                    hit_tp2 = True
+            
+            # ============================================================
+            # LÓGICA DE STOP LOSS (agora pode ser breakeven)
+            # ============================================================
+            hit_stop_loss = False
+            if signal == "LONG":
                 if current_price <= stop_loss_price:
                     hit_stop_loss = True
-                elif current_price >= take_profit_price:
-                    hit_take_profit = True
             else:  # SHORT
-                # SHORT: SL acima, TP abaixo
                 if current_price >= stop_loss_price:
                     hit_stop_loss = True
-                elif current_price <= take_profit_price:
-                    hit_take_profit = True
             
-            # Executar saída se necessário
-            if hit_stop_loss or hit_take_profit:
-                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit"
+            # Executar saída total (TP2 ou SL)
+            if hit_stop_loss or hit_tp2:
+                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit 2"
                 emoji = "🔴" if hit_stop_loss else "🟢"
+                
+                # Se SL e breakeven_set=True, foi saída no breakeven (sem perda nem ganho)
+                if hit_stop_loss and breakeven_set:
+                    exit_type = "Breakeven (Stop Loss)"
+                    emoji = "🟡"
                 
                 log(f"{emoji} {exit_type} atingido para {coin}!", "INFO")
                 log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
-                log(f"   � Preço atual: ${current_price:.4f}", "INFO")
+                log(f"   💰 Preço saída: ${current_price:.4f}", "INFO")
                 log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
                 
-                # Executar ordem de saída (MARKET para garantir execução imediata)
+                # Vender a quantidade restante (100% no caso do TP2)
                 exit_side = "sell" if signal == "LONG" else "buy"
-                
-                # Calcular valor em USD para fechar posição
-                amount_usd = amount * current_price
+                amount_usd = amount_remaining * current_price
                 
                 success = self.exchange.create_market_order(
                     symbol,
@@ -1749,16 +1961,16 @@ class TradingStrategy:
                 )
                 
                 if success:
-                    # Registrar venda no Google Sheets com mesmo trade_id da compra
+                    # Registrar venda final no Google Sheets
                     reason = exit_type
                     self.state.record_sell(
                         current_price,
-                        amount,
+                        amount_remaining,
                         coin,
                         signal,
-                        rsi=None,  # Não temos RSI na saída
+                        rsi=None,
                         reason=reason,
-                        trade_id=trade_id  # Usar o mesmo ID da compra!
+                        trade_id=trade_id
                     )
                     
                     # Notificar Discord
@@ -1766,24 +1978,27 @@ class TradingStrategy:
                         f"{emoji} {exit_type.upper()} EXECUTADO - {coin}",
                         f"**Preço de entrada:** ${entry_price:.4f}\n"
                         f"**Preço de saída:** ${current_price:.4f}\n"
-                        f"**Quantidade:** {amount:.4f} {coin}\n"
+                        f"**Quantidade vendida:** {amount_remaining:.4f} {coin}\n"
                         f"**Operação:** {signal}\n"
                         f"**ROI:** {roi_current:+.2f}%\n"
                         f"**Trade ID:** {trade_id}",
                         0xff0000 if hit_stop_loss else 0x00ff00
                     )
                     
-                    # Limpar estado
+                    # Limpar estado (trade finalizado)
                     self.state.state["active_targets"] = {}
                     self.state.state["position_entries"] = []
                     self.state.save_state()
                     
-                    log(f"✅ Posição {coin} fechada com sucesso!", "INFO")
+                    log(f"✅ Posição {coin} fechada completamente!", "INFO")
                 else:
                     log(f"❌ Erro ao executar ordem de saída para {coin}", "ERROR")
             else:
-                # Apenas log de monitoramento (sem poluir muito)
-                log(f"👀 Monitorando {coin}: Preço ${current_price:.4f} | ROI {roi_current:+.2f}% | SL ${stop_loss_price:.4f} | TP ${take_profit_price:.4f}", "DEBUG")
+                # Log de monitoramento
+                log(f"👀 Monitorando {coin}: ${current_price:.4f} | ROI {roi_current:+.2f}% | "
+                    f"SL ${stop_loss_price:.4f} | TP1 ${take_profit_1_price:.4f} | TP2 ${take_profit_2_price:.4f} | "
+                    f"TP1_hit={tp1_hit} | Restante={amount_remaining:.4f}", "DEBUG")
+
                 
         except Exception as e:
             log(f"❌ Erro monitorando saídas: {e}", "ERROR")
