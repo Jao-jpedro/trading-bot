@@ -773,22 +773,33 @@ class StateManager:
                 
                 log(f"   ✅ Usando Stop Loss dinâmico (ATR SL: {atr_sl_mult}x)", "INFO")
             else:
-                log(f"   ⚠️ ATR não disponível, usando Stop Loss fixo (2%)", "WARN")
+                log(f"   ⚠️ ATR não disponível, usando Stop Loss fixo (2% no preço = 10% capital com 5x)", "WARN")
+                
+                # Com 5x alavancagem, 2% no preço = 10% de perda no capital
+                leverage = 5
+                sl_price_move = 0.10 / leverage  # 10% perda máxima / 5 = 2% no preço
                 
                 if operation == "LONG":
-                    stop_loss_price = entry_price * 0.98  # -2%
+                    stop_loss_price = entry_price * (1 - sl_price_move)  # -2%
                 else:  # SHORT
-                    stop_loss_price = entry_price * 1.02  # +2%
+                    stop_loss_price = entry_price * (1 + sl_price_move)  # +2%
             
-            # Calcular Take Profits FIXOS (10% e 20%)
+            # Calcular Take Profits FIXOS considerando ALAVANCAGEM
+            # Com 5x alavancagem:
+            # - TP1: 10% de ganho no capital = 2% de movimento no preço (10% / 5)
+            # - TP2: 20% de ganho no capital = 4% de movimento no preço (20% / 5)
+            leverage = 5  # Alavancagem usada
+            tp1_price_move = 0.10 / leverage  # 10% / 5 = 2% no preço
+            tp2_price_move = 0.20 / leverage  # 20% / 5 = 4% no preço
+            
             if operation == "LONG":
-                take_profit_1_price = entry_price * 1.10  # +10%
-                take_profit_2_price = entry_price * 1.20  # +20%
+                take_profit_1_price = entry_price * (1 + tp1_price_move)  # +2%
+                take_profit_2_price = entry_price * (1 + tp2_price_move)  # +4%
             else:  # SHORT
-                take_profit_1_price = entry_price * 0.90  # -10%
-                take_profit_2_price = entry_price * 0.80  # -20%
+                take_profit_1_price = entry_price * (1 - tp1_price_move)  # -2%
+                take_profit_2_price = entry_price * (1 - tp2_price_move)  # -4%
             
-            log(f"   ✅ Usando Take Profits FIXOS (TP1: 10%, TP2: 20%)", "INFO")
+            log(f"   ✅ Usando Take Profits com ALAVANCAGEM {leverage}x (TP1: {tp1_price_move*100:.1f}% preço = 10% capital, TP2: {tp2_price_move*100:.1f}% preço = 20% capital)", "INFO")
             
             # Determinar símbolo (assumir SOL se não especificado)
             symbol = "SOL/USDC:USDC"  # Default
@@ -908,16 +919,22 @@ class StateManager:
         
         # Calcular métricas
         position_size_usd = price * amount
+        leverage = 5  # Alavancagem usada
         
-        # Calcular % de stop loss e take profits
+        # Calcular % de stop loss e take profits (IMPACTO NO CAPITAL com alavancagem)
         if operation == "LONG":
-            sl_pct = ((price - stop_loss) / price * 100) if stop_loss else None
-            tp1_pct = ((take_profit_1 - price) / price * 100) if take_profit_1 else None
-            tp2_pct = ((take_profit_2 - price) / price * 100) if take_profit_2 else None
+            sl_price_move = ((price - stop_loss) / price * 100) if stop_loss else None
+            tp1_price_move = ((take_profit_1 - price) / price * 100) if take_profit_1 else None
+            tp2_price_move = ((take_profit_2 - price) / price * 100) if take_profit_2 else None
         else:  # SHORT
-            sl_pct = ((stop_loss - price) / price * 100) if stop_loss else None
-            tp1_pct = ((price - take_profit_1) / price * 100) if take_profit_1 else None
-            tp2_pct = ((price - take_profit_2) / price * 100) if take_profit_2 else None
+            sl_price_move = ((stop_loss - price) / price * 100) if stop_loss else None
+            tp1_price_move = ((price - take_profit_1) / price * 100) if take_profit_1 else None
+            tp2_price_move = ((price - take_profit_2) / price * 100) if take_profit_2 else None
+        
+        # Multiplicar por alavancagem para obter impacto real no capital
+        sl_pct = (sl_price_move * leverage) if sl_price_move else None
+        tp1_pct = (tp1_price_move * leverage) if tp1_price_move else None
+        tp2_pct = (tp2_price_move * leverage) if tp2_price_move else None
         
         # Calcular Risk:Reward ratio
         risk_reward = (tp1_pct / sl_pct) if (sl_pct and tp1_pct and sl_pct > 0) else None
@@ -968,7 +985,7 @@ class StateManager:
             'slippage_pct': None,  # Será calculado em produção comparando preço esperado vs real
             'position_size_usd': position_size_usd,
             'position_size_coins': amount,
-            'leverage': 1,  # Sem alavancagem por padrão
+            'leverage': leverage,  # 5x alavancagem
             
             # Gestão de Risco - Stops e Targets
             'stop_loss_price': stop_loss,
@@ -1060,13 +1077,20 @@ class StateManager:
         self.state["last_sell_timestamp"] = now.isoformat()
         self.save_state()
         
-        # Calcular resultados
+        # Calcular resultados (considerando alavancagem)
+        leverage = 5  # Alavancagem usada
+        
         if entry_price:
+            # Calcular movimento de preço
             if operation == "LONG":
-                pnl_pct = ((price - entry_price) / entry_price) * 100
+                price_move_pct = ((price - entry_price) / entry_price) * 100
             else:  # SHORT
-                pnl_pct = ((entry_price - price) / entry_price) * 100
+                price_move_pct = ((entry_price - price) / entry_price) * 100
             
+            # P&L em % do capital = movimento de preço × alavancagem
+            pnl_pct = price_move_pct * leverage
+            
+            # P&L em USD considerando a quantidade
             pnl_usd = (price - entry_price) * amount if operation == "LONG" else (entry_price - price) * amount
         else:
             pnl_pct = None
@@ -1111,7 +1135,7 @@ class StateManager:
             'slippage_pct': None,
             'position_size_usd': price * amount,
             'position_size_coins': amount,
-            'leverage': 1,
+            'leverage': leverage,  # 5x alavancagem
             
             # Gestão de Risco (copiar da entrada)
             'stop_loss_price': None,
@@ -1817,27 +1841,34 @@ class TradingStrategy:
                 
                 log(f"✅ Stop Loss dinâmico (ATR 1.5x): ${stop_loss_price:.4f} (-{stop_loss_roi:.1f}%)", "INFO")
             else:
-                log(f"⚠️ ATR inválido, usando stop loss fixo (2%)", "WARN")
+                log(f"⚠️ ATR inválido, usando stop loss fixo", "WARN")
+                
+                # Com 5x alavancagem, 2% no preço = 10% de perda no capital
+                sl_price_move = self.cfg.STOP_LOSS_PRICE_PCT / 100.0  # 2%
                 
                 if signal == "LONG":
-                    stop_loss_price = current_price * (1 - self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+                    stop_loss_price = current_price * (1 - sl_price_move)
                 else:
-                    stop_loss_price = current_price * (1 + self.cfg.STOP_LOSS_PRICE_PCT / 100.0)
+                    stop_loss_price = current_price * (1 + sl_price_move)
                 
                 stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
             
-            # Take Profits: SEMPRE FIXOS em 10% e 20%
+            # Take Profits: considerar ALAVANCAGEM
+            # Com 5x: TP1 10% capital = 2% preço, TP2 20% capital = 4% preço
+            tp1_price_move = self.cfg.TAKE_PROFIT_1_PCT / 100.0 / self.cfg.LEVERAGE  # 10% / 5 = 2%
+            tp2_price_move = self.cfg.TAKE_PROFIT_2_PCT / 100.0 / self.cfg.LEVERAGE  # 20% / 5 = 4%
+            
             if signal == "LONG":
-                take_profit_1_price = current_price * (1 + self.cfg.TAKE_PROFIT_1_PCT / 100.0)  # +10%
-                take_profit_2_price = current_price * (1 + self.cfg.TAKE_PROFIT_2_PCT / 100.0)  # +20%
+                take_profit_1_price = current_price * (1 + tp1_price_move)  # +2%
+                take_profit_2_price = current_price * (1 + tp2_price_move)  # +4%
             else:  # SHORT
-                take_profit_1_price = current_price * (1 - self.cfg.TAKE_PROFIT_1_PCT / 100.0)  # -10%
-                take_profit_2_price = current_price * (1 - self.cfg.TAKE_PROFIT_2_PCT / 100.0)  # -20%
+                take_profit_1_price = current_price * (1 - tp1_price_move)  # -2%
+                take_profit_2_price = current_price * (1 - tp2_price_move)  # -4%
             
-            take_profit_1_roi = self.cfg.TAKE_PROFIT_1_PCT * self.cfg.LEVERAGE
-            take_profit_2_roi = self.cfg.TAKE_PROFIT_2_PCT * self.cfg.LEVERAGE
+            take_profit_1_roi = self.cfg.TAKE_PROFIT_1_PCT  # 10% no capital
+            take_profit_2_roi = self.cfg.TAKE_PROFIT_2_PCT  # 20% no capital
             
-            log(f"✅ Take Profits FIXOS: TP1=10% (50% posição), TP2=20% (50% posição)", "INFO")
+            log(f"✅ Take Profits com ALAVANCAGEM {self.cfg.LEVERAGE}x: TP1={tp1_price_move*100:.1f}% preço (10% capital), TP2={tp2_price_move*100:.1f}% preço (20% capital)", "INFO")
             
             # Registrar entrada com TODOS os dados
             trade_id = self.state.record_buy(
