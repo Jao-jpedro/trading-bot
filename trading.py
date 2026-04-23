@@ -549,20 +549,28 @@ class StateManager:
             if not self.exchange:
                 return False
             
-            # Buscar posição atual
-            position = self.exchange.get_position()
+            # Buscar posições de todos os símbolos configurados
+            from dataclasses import fields
+            cfg_fields = {f.name: f.default for f in fields(TradingConfig)}
+            symbols = cfg_fields.get('SYMBOLS', ["SOL/USDC:USDC"])
             
-            # Se tem posição aberta mas sem entries no estado, precisa reconstruir
-            if position and abs(float(position.get("contracts", 0))) > 0:
-                has_entries = len(self.state.get("position_entries", [])) > 0
-                if not has_entries:
-                    log(f"🔍 Posição detectada ({abs(float(position.get('contracts', 0))):.4f} {position.get('symbol', 'SOL')}) mas estado vazio", "WARN")
-                    return True
+            for symbol in symbols:
+                position = self.exchange.get_position(symbol)
+                
+                # Se tem posição aberta mas sem entries no estado, precisa reconstruir
+                if position and abs(float(position.get("contracts", 0))) > 0:
+                    has_entries = len(self.state.get("position_entries", [])) > 0
+                    if not has_entries:
+                        coin = symbol.split('/')[0]
+                        log(f"🔍 Posição {coin} detectada ({abs(float(position.get('contracts', 0))):.4f}) mas estado vazio - RECONSTRUIR", "WARN")
+                        return True
             
             return False
             
         except Exception as e:
-            log(f"Erro verificando necessidade de reconstrução: {e}", "DEBUG")
+            log(f"❌ Erro verificando necessidade de reconstrução: {e}", "ERROR")
+            import traceback
+            log(f"   {traceback.format_exc()}", "DEBUG")
             return False
     
     def load_state(self) -> dict:
@@ -629,37 +637,50 @@ class StateManager:
                     # Converter timestamp
                     timestamp = datetime.fromtimestamp(time_ms / 1000.0)
                     
-                    # Detectar COMPRAS: "Open Long" ou "Open Short" (que seria fechar uma short anterior)
-                    if "Open Long" in direction or direction == "Open Long":
-                        # É uma compra
+                    # Detectar COMPRAS: "Open Long" ou "Close Short"
+                    if "Open Long" in direction:
+                        # É uma compra (abrir long)
                         entries.append({
                             "price": px,
                             "amount": sz,
-                            "timestamp": timestamp.isoformat()
+                            "timestamp": timestamp.isoformat(),
+                            "operation": "LONG"
                         })
                         last_buy_time = timestamp
-                        log(f"   🟢 Compra: {sz:.4f} SOL @ ${px:.4f} em {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
+                        log(f"   🟢 LONG aberto: {sz:.4f} SOL @ ${px:.4f} em {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
                     
-                    # Detectar VENDAS: "Close Long" (fechar posição long) ou "Open Short" (vender a descoberto)
-                    elif "Close Long" in direction or direction == "Close Long":
-                        # É uma venda (fechando long)
+                    # Detectar VENDAS A DESCOBERTO: "Open Short"
+                    elif "Open Short" in direction:
+                        # É uma venda a descoberto (abrir short)
+                        entries.append({
+                            "price": px,
+                            "amount": sz,
+                            "timestamp": timestamp.isoformat(),
+                            "operation": "SHORT"
+                        })
+                        last_buy_time = timestamp
+                        log(f"   🔴 SHORT aberto: {sz:.4f} SOL @ ${px:.4f} em {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
+                    
+                    # Detectar FECHAMENTO: "Close Long" ou "Close Short"
+                    elif "Close" in direction:
+                        # É um fechamento de posição
                         last_sell_time = timestamp
                         
                         # Remover proporcionalmente dos entries (FIFO - first in, first out)
-                        remaining_to_sell = sz
+                        remaining_to_close = sz
                         i = 0
-                        while i < len(entries) and remaining_to_sell > 0:
-                            if entries[i]["amount"] <= remaining_to_sell:
+                        while i < len(entries) and remaining_to_close > 0:
+                            if entries[i]["amount"] <= remaining_to_close:
                                 # Remove entrada completamente
-                                remaining_to_sell -= entries[i]["amount"]
+                                remaining_to_close -= entries[i]["amount"]
                                 entries.pop(i)
                             else:
                                 # Remove parcialmente
-                                entries[i]["amount"] -= remaining_to_sell
-                                remaining_to_sell = 0
+                                entries[i]["amount"] -= remaining_to_close
+                                remaining_to_close = 0
                                 i += 1
                         
-                        log(f"   🔴 Venda: {sz:.4f} SOL @ ${px:.4f} em {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
+                        log(f"   ⚪ Fechamento: {sz:.4f} SOL @ ${px:.4f} em {timestamp.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
                         
                 except Exception as e:
                     log(f"Erro processando fill: {e}", "DEBUG")
@@ -1889,6 +1910,13 @@ class TradingStrategy:
         # Verificar se há posição ativa
         active = self.state.state.get("active_targets")
         if not active:
+            log("ℹ️  Nenhum active_targets encontrado - nada para monitorar", "DEBUG")
+            log(f"   Estado atual: {list(self.state.state.keys())}", "DEBUG")
+            
+            # Tentar reconstruir se houver posição aberta
+            if self.state.needs_reconstruction():
+                log("🔧 Detectada posição sem targets - reconstruindo...", "WARN")
+                self.state.reconstruct_from_hyperliquid(self.exchange)
             return
         
         symbol = active.get("symbol")
