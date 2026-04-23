@@ -31,12 +31,48 @@ _HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 _HTTP_TIMEOUT = 10
 _SESSION = requests.Session()
 
-def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT):
-    """Helper para fazer requisições POST JSON"""
+# Sistema de rate limiting
+_RATE_LIMIT_DELAY = 0.5  # 500ms entre requisições
+_LAST_REQUEST_TIME = 0
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = [2, 5, 10]  # Segundos de espera entre retries
+
+def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry_count: int = 0):
+    """Helper para fazer requisições POST JSON com rate limiting e retry"""
+    global _LAST_REQUEST_TIME
+    
+    # Rate limiting: esperar entre requisições
+    current_time = time.time()
+    time_since_last = current_time - _LAST_REQUEST_TIME
+    if time_since_last < _RATE_LIMIT_DELAY:
+        time.sleep(_RATE_LIMIT_DELAY - time_since_last)
+    
     try:
+        _LAST_REQUEST_TIME = time.time()
         r = _SESSION.post(url, json=payload, timeout=timeout)
+        
+        # Se receber 429 (rate limit), fazer retry com backoff exponencial
+        if r.status_code == 429:
+            if retry_count < _MAX_RETRIES:
+                wait_time = _RETRY_BACKOFF[retry_count]
+                print(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {retry_count + 1}/{_MAX_RETRIES}...")
+                time.sleep(wait_time)
+                return _http_post_json(url, payload, timeout, retry_count + 1)
+            else:
+                print(f"[ERROR] Rate limit persistente após {_MAX_RETRIES} tentativas")
+                return None
+        
         r.raise_for_status()
         return r.json()
+    except requests.exceptions.HTTPError as e:
+        if retry_count < _MAX_RETRIES and e.response and e.response.status_code >= 500:
+            # Erro de servidor, tentar novamente
+            wait_time = _RETRY_BACKOFF[retry_count]
+            print(f"[WARN] Erro de servidor ({e.response.status_code}), aguardando {wait_time}s antes de retry...")
+            time.sleep(wait_time)
+            return _http_post_json(url, payload, timeout, retry_count + 1)
+        print(f"[WARN] Requisição falhou: {e}")
+        return None
     except Exception as e:
         print(f"[WARN] Requisição falhou: {e}")
         return None
@@ -1255,17 +1291,43 @@ class ExchangeConnector:
             return pd.DataFrame()
     
     def get_current_price(self, symbol: str) -> float:
-        """Busca preço atual de um símbolo"""
+        """Busca preço atual de um símbolo com cache"""
         try:
             coin = symbol.split('/')[0]
+            cache_key = f"price_{symbol}"
+            
+            # Verificar cache (válido por 30 segundos para preços)
+            if cache_key in self._cache:
+                cached_price, cached_time = self._cache[cache_key]
+                age = time.time() - cached_time
+                
+                if age < 30:  # Cache de 30 segundos para preços
+                    log(f"💰 Preço {coin} em cache: ${cached_price:.4f} ({age:.1f}s atrás)", "DEBUG")
+                    return cached_price
+            
+            # Adicionar delay antes de buscar preço
+            time.sleep(0.5)  # 500ms entre requisições
             
             # Buscar direto da Hyperliquid
             ticker = self.hyperliquid.fetch_ticker(symbol)
             price = ticker['last']
+            
+            # Salvar no cache
+            self._cache[cache_key] = (price, time.time())
+            
             log(f"💰 Preço atual {coin}: ${price:.4f}", "DEBUG")
             return price
         except Exception as e:
             log(f"❌ Erro buscando preço {symbol}: {e}", "ERROR")
+            
+            # Tentar usar preço do cache mesmo expirado
+            cache_key = f"price_{symbol}"
+            if cache_key in self._cache:
+                cached_price, cached_time = self._cache[cache_key]
+                age = time.time() - cached_time
+                log(f"⚠️ Usando preço em cache expirado ({age/60:.1f} min): ${cached_price:.4f}", "WARN")
+                return cached_price
+            
             return 0.0
     
     def get_balance(self) -> float:
@@ -1320,40 +1382,64 @@ class ExchangeConnector:
             return None
     
     def create_market_order(self, symbol: str, side: str, amount_usd: float, leverage: int) -> bool:
-        """Cria ordem market na Hyperliquid"""
+        """Cria ordem market na Hyperliquid com logs detalhados"""
         try:
+            coin = symbol.split('/')[0]
+            
+            log(f"", "INFO")
+            log(f"🔨 INICIANDO CREATE_MARKET_ORDER", "INFO")
+            log(f"   Symbol: {symbol}", "INFO")
+            log(f"   Side: {side}", "INFO")
+            log(f"   Amount USD: ${amount_usd:.2f}", "INFO")
+            log(f"   Leverage: {leverage}x", "INFO")
+            
             # Configurar leverage primeiro
-            log(f"🔧 Configurando leverage {leverage}x para {symbol}", "DEBUG")
-            self.hyperliquid.set_leverage(leverage, symbol, {"marginMode": "isolated"})
+            log(f"🔧 Configurando leverage {leverage}x para {symbol}", "INFO")
+            try:
+                self.hyperliquid.set_leverage(leverage, symbol, {"marginMode": "isolated"})
+                log(f"✅ Leverage configurado com sucesso", "DEBUG")
+            except Exception as e:
+                log(f"⚠️ Erro ao configurar leverage (pode já estar configurado): {e}", "WARN")
             
             # Buscar preço atual
+            log(f"📊 Buscando preço atual de {coin}...", "DEBUG")
             current_price = self.get_current_price(symbol)
             if current_price <= 0:
                 log("❌ Preço inválido, não é possível criar ordem", "ERROR")
                 return False
+            log(f"✅ Preço atual: ${current_price:.4f}", "DEBUG")
             
             # Calcular quantidade de coins com alavancagem
             # Fórmula: amount = (USD_a_gastar * leverage) / preço
             notional = amount_usd * leverage
             amount = notional / current_price
             
+            log(f"🧮 CÁLCULO DE QUANTIDADE:", "INFO")
+            log(f"   Notional: ${notional:.2f}", "INFO")
+            log(f"   Amount calculado: {amount:.6f} {coin}", "INFO")
+            
             # Arredondar quantidade conforme precisão do mercado
+            amount_before = amount
             amount = float(self.hyperliquid.amount_to_precision(symbol, amount))
+            log(f"   Amount arredondado: {amount:.6f} {coin} (antes: {amount_before:.6f})", "INFO")
             
             # Verificar valor mínimo
             notional_value = amount * current_price
+            log(f"   Valor nocional final: ${notional_value:.2f}", "INFO")
+            
             if notional_value < self.cfg.MIN_ORDER_USD:
                 log(f"❌ Valor nocional muito baixo: ${notional_value:.2f} < ${self.cfg.MIN_ORDER_USD}", "ERROR")
                 return False
             
-            coin = symbol.split('/')[0]
-            log(f"📤 Criando ordem: {side} {amount:.4f} {coin}", "INFO")
+            log(f"📤 CRIANDO ORDEM MARKET:", "INFO")
+            log(f"   {side.upper()} {amount:.4f} {coin}", "INFO")
             log(f"   💰 USD investidos: ${amount_usd:.2f}", "INFO")
             log(f"   📊 Leverage: {leverage}x", "INFO")
             log(f"   💵 Valor nocional: ${notional:.2f}", "INFO")
             log(f"   📈 Preço: ${current_price:.4f}", "INFO")
             
             # Criar ordem market (Hyperliquid exige price para calcular slippage)
+            log(f"🚀 Enviando ordem para Hyperliquid...", "INFO")
             order = self.hyperliquid.create_order(
                 symbol=symbol,
                 type='market',
@@ -1363,11 +1449,18 @@ class ExchangeConnector:
                 params={}
             )
             
-            log(f"✅ Ordem criada com sucesso: {order}", "INFO")
+            log(f"✅ ORDEM CRIADA COM SUCESSO!", "INFO")
+            log(f"   Order ID: {order.get('id', 'N/A')}", "INFO")
+            log(f"   Status: {order.get('status', 'N/A')}", "INFO")
+            log(f"   Info completa: {order}", "DEBUG")
             return True
             
         except Exception as e:
-            log(f"❌ Erro criando ordem: {e}", "ERROR")
+            log(f"❌ ERRO CRÍTICO AO CRIAR ORDEM!", "ERROR")
+            log(f"   Exception: {type(e).__name__}", "ERROR")
+            log(f"   Message: {str(e)}", "ERROR")
+            import traceback
+            log(f"   Traceback: {traceback.format_exc()}", "ERROR")
             return False
     
     def close_position_partial(self, percentage: float) -> bool:
@@ -1817,9 +1910,11 @@ class TradingStrategy:
             return
         
         try:
-            # Buscar preço atual
-            ticker = self.exchange.hyperliquid.fetch_ticker(symbol)
-            current_price = ticker['last']
+            # Buscar preço atual usando método com cache
+            current_price = self.exchange.get_current_price(symbol)
+            if current_price == 0.0:
+                log(f"⚠️ Preço inválido para {symbol}, pulando monitoramento", "WARN")
+                return
             
             # Calcular ROI atual
             if signal == "LONG":
@@ -1829,6 +1924,19 @@ class TradingStrategy:
             
             roi_current = price_change_pct * self.cfg.LEVERAGE
             
+            # LOGS DETALHADOS PARA DEBUG
+            log(f"", "INFO")
+            log(f"🔍 DEBUG MONITORAMENTO - {coin} ({signal})", "INFO")
+            log(f"   💰 Preço Atual: ${current_price:.4f}", "INFO")
+            log(f"   📈 Preço Entrada: ${entry_price:.4f}", "INFO")
+            log(f"   🎯 TP1 (10%): ${take_profit_1_price:.4f} {'✅ ATINGIDO' if (signal == 'LONG' and current_price >= take_profit_1_price) or (signal == 'SHORT' and current_price <= take_profit_1_price) else '❌ NÃO'}", "INFO")
+            log(f"   🎯 TP2 (20%): ${take_profit_2_price:.4f} {'✅ ATINGIDO' if (signal == 'LONG' and current_price >= take_profit_2_price) or (signal == 'SHORT' and current_price <= take_profit_2_price) else '❌ NÃO'}", "INFO")
+            log(f"   🛑 Stop Loss: ${stop_loss_price:.4f} {'🔴 ATINGIDO' if (signal == 'LONG' and current_price <= stop_loss_price) or (signal == 'SHORT' and current_price >= stop_loss_price) else '✅ SEGURO'}", "INFO")
+            log(f"   📊 Variação: {price_change_pct:+.2f}% | ROI: {roi_current:+.2f}%", "INFO")
+            log(f"   🔢 Quantidade Restante: {amount_remaining:.4f} {coin}", "INFO")
+            log(f"   🏁 TP1 Executado: {'Sim' if tp1_hit else 'Não'}", "INFO")
+            log(f"   🔒 Breakeven Ativo: {'Sim' if breakeven_set else 'Não'}", "INFO")
+            
             # ============================================================
             # LÓGICA DE TP1 (10% - vende 50% da posição)
             # ============================================================
@@ -1837,9 +1945,11 @@ class TradingStrategy:
                 if signal == "LONG":
                     if current_price >= take_profit_1_price:
                         hit_tp1 = True
+                        log(f"🎯 CONDIÇÃO TP1 ATINGIDA! Preço ${current_price:.4f} >= TP1 ${take_profit_1_price:.4f}", "INFO")
                 else:  # SHORT
                     if current_price <= take_profit_1_price:
                         hit_tp1 = True
+                        log(f"🎯 CONDIÇÃO TP1 ATINGIDA! Preço ${current_price:.4f} <= TP1 ${take_profit_1_price:.4f}", "INFO")
                 
                 if hit_tp1:
                     log(f"🎯 TP1 (10%) atingido para {coin}!", "INFO")
@@ -1852,6 +1962,12 @@ class TradingStrategy:
                     exit_side = "sell" if signal == "LONG" else "buy"
                     amount_usd = amount_to_sell * current_price
                     
+                    log(f"📤 EXECUTANDO VENDA TP1:", "INFO")
+                    log(f"   Lado: {exit_side.upper()}", "INFO")
+                    log(f"   Quantidade: {amount_to_sell:.4f} {coin}", "INFO")
+                    log(f"   Valor USD: ${amount_usd:.2f}", "INFO")
+                    log(f"   Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                    
                     success = self.exchange.create_market_order(
                         symbol,
                         exit_side,
@@ -1860,6 +1976,8 @@ class TradingStrategy:
                     )
                     
                     if success:
+                        log(f"✅ ORDEM TP1 EXECUTADA COM SUCESSO!", "INFO")
+                        
                         # Registrar venda parcial no Google Sheets
                         self.state.record_sell(
                             current_price,
@@ -1909,8 +2027,12 @@ class TradingStrategy:
                         log(f"✅ TP1 executado! 50% vendido, SL movido para breakeven", "INFO")
                         return  # Sair para evitar checar TP2/SL no mesmo ciclo
                     else:
-                        log(f"❌ Erro ao executar TP1 para {coin}", "ERROR")
+                        log(f"❌ ERRO AO EXECUTAR ORDEM TP1! Verifique create_market_order", "ERROR")
                         return
+                else:
+                    log(f"⏳ TP1 ainda não atingido (aguardando ${take_profit_1_price:.4f})", "DEBUG")
+            else:
+                log(f"✅ TP1 já foi executado anteriormente", "DEBUG")
             
             # ============================================================
             # LÓGICA DE TP2 (20% - vende 100% da posição total)
@@ -1919,9 +2041,11 @@ class TradingStrategy:
             if signal == "LONG":
                 if current_price >= take_profit_2_price:
                     hit_tp2 = True
+                    log(f"🎯 CONDIÇÃO TP2 ATINGIDA! Preço ${current_price:.4f} >= TP2 ${take_profit_2_price:.4f}", "INFO")
             else:  # SHORT
                 if current_price <= take_profit_2_price:
                     hit_tp2 = True
+                    log(f"🎯 CONDIÇÃO TP2 ATINGIDA! Preço ${current_price:.4f} <= TP2 ${take_profit_2_price:.4f}", "INFO")
             
             # ============================================================
             # LÓGICA DE STOP LOSS (agora pode ser breakeven)
@@ -1930,9 +2054,11 @@ class TradingStrategy:
             if signal == "LONG":
                 if current_price <= stop_loss_price:
                     hit_stop_loss = True
+                    log(f"🛑 CONDIÇÃO STOP LOSS ATINGIDA! Preço ${current_price:.4f} <= SL ${stop_loss_price:.4f}", "INFO")
             else:  # SHORT
                 if current_price >= stop_loss_price:
                     hit_stop_loss = True
+                    log(f"🛑 CONDIÇÃO STOP LOSS ATINGIDA! Preço ${current_price:.4f} >= SL ${stop_loss_price:.4f}", "INFO")
             
             # Executar saída total (TP2 ou SL)
             if hit_stop_loss or hit_tp2:
@@ -1943,6 +2069,7 @@ class TradingStrategy:
                 if hit_stop_loss and breakeven_set:
                     exit_type = "Breakeven (Stop Loss)"
                     emoji = "🟡"
+                    log(f"🟡 SAÍDA NO BREAKEVEN DETECTADA!", "INFO")
                 
                 log(f"{emoji} {exit_type} atingido para {coin}!", "INFO")
                 log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
@@ -1953,6 +2080,12 @@ class TradingStrategy:
                 exit_side = "sell" if signal == "LONG" else "buy"
                 amount_usd = amount_remaining * current_price
                 
+                log(f"📤 EXECUTANDO VENDA {exit_type.upper()}:", "INFO")
+                log(f"   Lado: {exit_side.upper()}", "INFO")
+                log(f"   Quantidade: {amount_remaining:.4f} {coin}", "INFO")
+                log(f"   Valor USD: ${amount_usd:.2f}", "INFO")
+                log(f"   Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                
                 success = self.exchange.create_market_order(
                     symbol,
                     exit_side,
@@ -1961,6 +2094,8 @@ class TradingStrategy:
                 )
                 
                 if success:
+                    log(f"✅ ORDEM {exit_type.upper()} EXECUTADA COM SUCESSO!", "INFO")
+                    
                     # Registrar venda final no Google Sheets
                     reason = exit_type
                     self.state.record_sell(
@@ -2106,10 +2241,11 @@ def main():
     # Loop principal
     log("🔁 Entrando no loop principal (Ctrl+C para parar)", "INFO")
     
-    # Intervalo de verificação: 3 minutos
-    check_interval = 180  # 3 minutos em segundos
+    # Intervalo de verificação: 5 minutos (reduzido de 3 para evitar rate limit)
+    check_interval = 300  # 5 minutos em segundos
     
     log(f"⏰ Intervalo entre ciclos: {check_interval/60:.0f} minutos", "INFO")
+    log(f"ℹ️  Aumentado para 5 min para evitar rate limiting da API", "INFO")
     
     try:
         while True:
