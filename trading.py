@@ -1426,8 +1426,17 @@ class ExchangeConnector:
             log(f"❌ Erro buscando posição {symbol}: {e}", "ERROR")
             return None
     
-    def create_market_order(self, symbol: str, side: str, amount_usd: float, leverage: int) -> bool:
-        """Cria ordem market na Hyperliquid com logs detalhados"""
+    def create_market_order(self, symbol: str, side: str, amount_usd: float, leverage: int, is_close: bool = False) -> bool:
+        """
+        Cria ordem market na Hyperliquid com logs detalhados
+        
+        Args:
+            symbol: Par de trading (ex: SOL/USDC:USDC)
+            side: 'buy' ou 'sell'
+            amount_usd: Valor em USD a operar
+            leverage: Alavancagem (ex: 5)
+            is_close: Se True, adiciona reduceOnly=True (só fecha posição, não inverte)
+        """
         try:
             coin = symbol.split('/')[0]
             
@@ -1485,13 +1494,18 @@ class ExchangeConnector:
             
             # Criar ordem market (Hyperliquid exige price para calcular slippage)
             log(f"🚀 Enviando ordem para Hyperliquid...", "INFO")
+            
+            # Se é fechamento, adicionar reduceOnly para garantir que só fecha (não inverte)
+            params = {'reduceOnly': True} if is_close else {}
+            log(f"   Params: {params}", "DEBUG")
+            
             order = self.hyperliquid.create_order(
                 symbol=symbol,
                 type='market',
                 side=side,
                 amount=amount,
                 price=current_price,  # Necessário para Hyperliquid calcular slippage
-                params={}
+                params=params
             )
             
             log(f"✅ ORDEM CRIADA COM SUCESSO!", "INFO")
@@ -1508,10 +1522,10 @@ class ExchangeConnector:
             log(f"   Traceback: {traceback.format_exc()}", "ERROR")
             return False
     
-    def close_position_partial(self, percentage: float) -> bool:
+    def close_position_partial(self, symbol: str, percentage: float) -> bool:
         """Fecha parcialmente a posição (percentage = 0-100)"""
         try:
-            pos = self.get_position()
+            pos = self.get_position(symbol)
             if not pos:
                 log("⚠️ Nenhuma posição aberta para fechar", "WARN")
                 return False
@@ -1519,27 +1533,33 @@ class ExchangeConnector:
             current_amount = abs(float(pos.get('contracts', 0)))
             amount_to_close = current_amount * (percentage / 100.0)
             
+            # Determinar lado correto: LONG fecha com sell, SHORT fecha com buy
+            position_side = pos.get('side', 'long')
+            close_side = 'sell' if position_side == 'long' else 'buy'
+            
             # Arredondar
-            amount_to_close = float(self.hyperliquid.amount_to_precision(self.cfg.SYMBOL, amount_to_close))
+            amount_to_close = float(self.hyperliquid.amount_to_precision(symbol, amount_to_close))
             
             # Verificar mínimo
-            current_price = self.get_current_price()
+            current_price = self.get_current_price(symbol)
             notional = amount_to_close * current_price
             
             if notional < self.cfg.MIN_ORDER_USD:
                 log(f"⚠️ Ordem muito pequena (${notional:.2f} < ${self.cfg.MIN_ORDER_USD}), pulando", "WARN")
                 return False
             
-            log(f"📤 Fechando {percentage:.0f}% da posição ({amount_to_close:.4f} SOL)", "INFO")
+            coin = symbol.replace('/USDC:USDC', '')
+            log(f"📤 Fechando {percentage:.0f}% da posição ({amount_to_close:.4f} {coin})", "INFO")
+            log(f"   Posição: {position_side.upper()}, Ordem: {close_side.upper()}", "INFO")
             
-            # Fechar posição (ordem market com reduceOnly - Hyperliquid exige price)
+            # Fechar posição (ordem market com reduceOnly)
             order = self.hyperliquid.create_order(
-                symbol=self.cfg.SYMBOL,
+                symbol=symbol,
                 type='market',
-                side='sell',  # Sempre sell para fechar LONG
+                side=close_side,  # sell para LONG, buy para SHORT
                 amount=amount_to_close,
                 price=current_price,  # Necessário para Hyperliquid calcular slippage
-                params={'reduceOnly': True}
+                params={'reduceOnly': True}  # CRÍTICO: garante que só fecha, não inverte
             )
             
             log(f"✅ Posição fechada parcialmente: {order}", "INFO")
@@ -2031,11 +2051,23 @@ class TradingStrategy:
                         symbol,
                         exit_side,
                         amount_usd,
-                        self.cfg.LEVERAGE
+                        self.cfg.LEVERAGE,
+                        is_close=True  # Adiciona reduceOnly para não inverter posição
                     )
                     
                     if success:
                         log(f"✅ ORDEM TP1 EXECUTADA COM SUCESSO!", "INFO")
+                        
+                        # Obter timestamp de entrada para calcular tempo no trade
+                        entry_time = None
+                        if trade_id:
+                            entries = self.state.get("position_entries", [])
+                            for entry in entries:
+                                if entry.get("trade_id") == trade_id:
+                                    entry_time_str = entry.get("timestamp")
+                                    if entry_time_str:
+                                        entry_time = datetime.fromisoformat(entry_time_str)
+                                    break
                         
                         # Registrar venda parcial no Google Sheets
                         self.state.record_sell(
@@ -2045,7 +2077,9 @@ class TradingStrategy:
                             signal,
                             rsi=None,
                             reason="Take Profit 1 (50%)",
-                            trade_id=trade_id
+                            trade_id=trade_id,
+                            entry_price=entry_price,
+                            entry_time=entry_time
                         )
                         
                         # Notificar Discord
@@ -2149,11 +2183,23 @@ class TradingStrategy:
                     symbol,
                     exit_side,
                     amount_usd,
-                    self.cfg.LEVERAGE
+                    self.cfg.LEVERAGE,
+                    is_close=True  # Adiciona reduceOnly para não inverter posição
                 )
                 
                 if success:
                     log(f"✅ ORDEM {exit_type.upper()} EXECUTADA COM SUCESSO!", "INFO")
+                    
+                    # Obter timestamp de entrada para calcular tempo no trade
+                    entry_time = None
+                    if trade_id:
+                        entries = self.state.get("position_entries", [])
+                        for entry in entries:
+                            if entry.get("trade_id") == trade_id:
+                                entry_time_str = entry.get("timestamp")
+                                if entry_time_str:
+                                    entry_time = datetime.fromisoformat(entry_time_str)
+                                break
                     
                     # Registrar venda final no Google Sheets
                     reason = exit_type
@@ -2164,7 +2210,9 @@ class TradingStrategy:
                         signal,
                         rsi=None,
                         reason=reason,
-                        trade_id=trade_id
+                        trade_id=trade_id,
+                        entry_price=entry_price,
+                        entry_time=entry_time
                     )
                     
                     # Notificar Discord
