@@ -550,9 +550,14 @@ class StateManager:
                 return False
             
             # Buscar posições de todos os símbolos configurados
-            from dataclasses import fields
-            cfg_fields = {f.name: f.default for f in fields(TradingConfig)}
-            symbols = cfg_fields.get('SYMBOLS', ["SOL/USDC:USDC"])
+            # Usar lista padrão se SYMBOLS não estiver disponível
+            symbols = ["SOL/USDC:USDC", "XRP/USDC:USDC"]
+            
+            # Se exchange tem config, usar de lá
+            if hasattr(self.exchange, 'cfg') and hasattr(self.exchange.cfg, 'SYMBOLS'):
+                symbols = self.exchange.cfg.SYMBOLS
+            
+            log(f"🔍 Verificando reconstrução para símbolos: {symbols}", "DEBUG")
             
             for symbol in symbols:
                 position = self.exchange.get_position(symbol)
@@ -2003,56 +2008,122 @@ class TradingStrategy:
             
             roi_current = price_change_pct * self.cfg.LEVERAGE
             
+            # Verificar condições de TP e SL
+            tp1_atingido = (signal == 'LONG' and current_price >= take_profit_1_price) or (signal == 'SHORT' and current_price <= take_profit_1_price)
+            tp2_atingido = (signal == 'LONG' and current_price >= take_profit_2_price) or (signal == 'SHORT' and current_price <= take_profit_2_price)
+            sl_atingido = (signal == 'LONG' and current_price <= stop_loss_price) or (signal == 'SHORT' and current_price >= stop_loss_price)
+            
             # LOGS DETALHADOS PARA DEBUG
             log(f"", "INFO")
-            log(f"🔍 DEBUG MONITORAMENTO - {coin} ({signal})", "INFO")
-            log(f"   💰 Preço Atual: ${current_price:.4f}", "INFO")
-            log(f"   📈 Preço Entrada: ${entry_price:.4f}", "INFO")
-            log(f"   🎯 TP1 (10%): ${take_profit_1_price:.4f} {'✅ ATINGIDO' if (signal == 'LONG' and current_price >= take_profit_1_price) or (signal == 'SHORT' and current_price <= take_profit_1_price) else '❌ NÃO'}", "INFO")
-            log(f"   🎯 TP2 (20%): ${take_profit_2_price:.4f} {'✅ ATINGIDO' if (signal == 'LONG' and current_price >= take_profit_2_price) or (signal == 'SHORT' and current_price <= take_profit_2_price) else '❌ NÃO'}", "INFO")
-            log(f"   🛑 Stop Loss: ${stop_loss_price:.4f} {'🔴 ATINGIDO' if (signal == 'LONG' and current_price <= stop_loss_price) or (signal == 'SHORT' and current_price >= stop_loss_price) else '✅ SEGURO'}", "INFO")
-            log(f"   📊 Variação: {price_change_pct:+.2f}% | ROI: {roi_current:+.2f}%", "INFO")
-            log(f"   🔢 Quantidade Restante: {amount_remaining:.4f} {coin}", "INFO")
-            log(f"   🏁 TP1 Executado: {'Sim' if tp1_hit else 'Não'}", "INFO")
-            log(f"   🔒 Breakeven Ativo: {'Sim' if breakeven_set else 'Não'}", "INFO")
+            log(f"{'='*70}", "INFO")
+            log(f"🔍 MONITORAMENTO - {coin} ({signal})", "INFO")
+            log(f"{'='*70}", "INFO")
+            log(f"", "INFO")
+            log(f"� PREÇOS:", "INFO")
+            log(f"   💰 Atual: ${current_price:.4f}", "INFO")
+            log(f"   📈 Entrada: ${entry_price:.4f}", "INFO")
+            log(f"   📊 Variação: {price_change_pct:+.2f}% preço | {roi_current:+.2f}% ROI (com {self.cfg.LEVERAGE}x)", "INFO")
+            log(f"", "INFO")
+            
+            log(f"🎯 ALVOS DE SAÍDA:", "INFO")
+            log(f"   ✅ TP1 (2% preço / 10% ROI): ${take_profit_1_price:.4f} - {('✅ ATINGIDO' if tp1_atingido else '⏳ Aguardando')}", "INFO")
+            if tp1_atingido and not tp1_hit:
+                log(f"      💡 AÇÃO: Venderá 50% da posição agora!", "INFO")
+            elif tp1_hit:
+                log(f"      ✅ Já executado anteriormente", "INFO")
+            else:
+                if signal == 'LONG':
+                    falta = ((take_profit_1_price - current_price) / current_price) * 100
+                    log(f"      ⏳ Falta subir {falta:.2f}% para atingir", "INFO")
+                else:
+                    falta = ((current_price - take_profit_1_price) / current_price) * 100
+                    log(f"      ⏳ Falta cair {falta:.2f}% para atingir", "INFO")
+            
+            log(f"   🎯 TP2 (4% preço / 20% ROI): ${take_profit_2_price:.4f} - {('✅ ATINGIDO' if tp2_atingido else '⏳ Aguardando')}", "INFO")
+            if tp2_atingido:
+                log(f"      💡 AÇÃO: Venderá 100% da posição restante agora!", "INFO")
+            else:
+                if signal == 'LONG':
+                    falta = ((take_profit_2_price - current_price) / current_price) * 100
+                    log(f"      ⏳ Falta subir {falta:.2f}% para atingir", "INFO")
+                else:
+                    falta = ((current_price - take_profit_2_price) / current_price) * 100
+                    log(f"      ⏳ Falta cair {falta:.2f}% para atingir", "INFO")
+            
+            log(f"   🛑 Stop Loss: ${stop_loss_price:.4f} - {('🔴 ATINGIDO - PREJUÍZO!' if sl_atingido else '✅ Seguro')}", "INFO")
+            if sl_atingido:
+                log(f"      💡 AÇÃO: Venderá 100% da posição AGORA para limitar perdas!", "INFO")
+                log(f"      ⚠️  PREJUÍZO ATUAL: {roi_current:+.2f}%", "WARN")
+            else:
+                if signal == 'LONG':
+                    margem = ((current_price - stop_loss_price) / current_price) * 100
+                    log(f"      ✅ Margem de segurança: {margem:.2f}% (pode cair antes de stop)", "INFO")
+                else:
+                    margem = ((stop_loss_price - current_price) / current_price) * 100
+                    log(f"      ✅ Margem de segurança: {margem:.2f}% (pode subir antes de stop)", "INFO")
+            
+            log(f"", "INFO")
+            log(f"� POSIÇÃO:", "INFO")
+            log(f"   �🔢 Quantidade Restante: {amount_remaining:.4f} {coin}", "INFO")
+            log(f"   🏁 TP1 já executado: {'✅ Sim (vendeu 50%)' if tp1_hit else '❌ Não'}", "INFO")
+            log(f"   🔒 Breakeven ativo: {'✅ Sim (SL no preço entrada)' if breakeven_set else '❌ Não'}", "INFO")
+            log(f"", "INFO")
+            
+            # EXPLICAÇÃO DO STATUS ATUAL
+            if roi_current > 0:
+                log(f"📈 POSIÇÃO EM LUCRO (+{roi_current:.2f}%)", "INFO")
+                if tp2_atingido:
+                    log(f"   💚 TP2 atingido! Executando venda total...", "INFO")
+                elif tp1_atingido and not tp1_hit:
+                    log(f"   💚 TP1 atingido! Executando venda parcial (50%)...", "INFO")
+                else:
+                    log(f"   ⏳ Aguardando próximo alvo (TP1 ou TP2)", "INFO")
+            elif roi_current < 0:
+                log(f"📉 POSIÇÃO EM PREJUÍZO ({roi_current:+.2f}%)", "WARN")
+                if sl_atingido:
+                    log(f"   🔴 STOP LOSS ATINGIDO! Executando venda para limitar perdas...", "WARN")
+                else:
+                    log(f"   ⏳ Aguardando... Stop Loss ainda não atingido", "WARN")
+                    log(f"   💡 POR QUE NÃO VENDEU: Preço ainda acima do Stop Loss", "WARN")
+            else:
+                log(f"➡️  POSIÇÃO NO BREAKEVEN (0%)", "INFO")
+            
+            log(f"{'='*70}", "INFO")
+            log(f"", "INFO")
             
             # ============================================================
-            # LÓGICA DE TP1 (10% - vende 50% da posição)
+            # LÓGICA DE TP1 (10% ROI - vende 50% da posição)
             # ============================================================
             if not tp1_hit:
-                hit_tp1 = False
-                if signal == "LONG":
-                    if current_price >= take_profit_1_price:
-                        hit_tp1 = True
-                        log(f"🎯 CONDIÇÃO TP1 ATINGIDA! Preço ${current_price:.4f} >= TP1 ${take_profit_1_price:.4f}", "INFO")
-                else:  # SHORT
-                    if current_price <= take_profit_1_price:
-                        hit_tp1 = True
-                        log(f"🎯 CONDIÇÃO TP1 ATINGIDA! Preço ${current_price:.4f} <= TP1 ${take_profit_1_price:.4f}", "INFO")
+                hit_tp1 = tp1_atingido
                 
                 if hit_tp1:
-                    log(f"🎯 TP1 (10%) atingido para {coin}!", "INFO")
+                    log(f"", "INFO")
+                    log(f"🎯🎯🎯 TP1 (10% ROI) ATINGIDO PARA {coin}! 🎯🎯🎯", "INFO")
                     log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
-                    log(f"   💰 Preço TP1: ${current_price:.4f}", "INFO")
-                    log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
+                    log(f"   💰 Preço atual (TP1): ${current_price:.4f}", "INFO")
+                    log(f"   � Lucro: {roi_current:+.2f}%", "INFO")
+                    log(f"   📦 Ação: Vender 50% da posição", "INFO")
                     
                     # Vender 50% da posição
                     amount_to_sell = amount_remaining * 0.5
                     exit_side = "sell" if signal == "LONG" else "buy"
                     amount_usd = amount_to_sell * current_price
                     
-                    log(f"📤 EXECUTANDO VENDA TP1:", "INFO")
-                    log(f"   Lado: {exit_side.upper()}", "INFO")
-                    log(f"   Quantidade: {amount_to_sell:.4f} {coin}", "INFO")
-                    log(f"   Valor USD: ${amount_usd:.2f}", "INFO")
-                    log(f"   Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                    log(f"", "INFO")
+                    log(f"📤 EXECUTANDO VENDA TP1 (REDUCE ONLY - SÓ FECHA):", "INFO")
+                    log(f"   🔄 Lado da ordem: {exit_side.upper()} ({signal} fecha com {exit_side})", "INFO")
+                    log(f"   🪙 Quantidade: {amount_to_sell:.4f} {coin} (50% da posição)", "INFO")
+                    log(f"   💵 Valor USD: ${amount_usd:.2f}", "INFO")
+                    log(f"   📊 Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                    log(f"   🔒 ReduceOnly: TRUE (garante que só fecha, não inverte)", "INFO")
                     
                     success = self.exchange.create_market_order(
                         symbol,
                         exit_side,
                         amount_usd,
                         self.cfg.LEVERAGE,
-                        is_close=True  # Adiciona reduceOnly para não inverter posição
+                        is_close=True  # CRÍTICO: reduceOnly=True - só fecha, não inverte
                     )
                     
                     if success:
@@ -2155,40 +2226,52 @@ class TradingStrategy:
             
             # Executar saída total (TP2 ou SL)
             if hit_stop_loss or hit_tp2:
-                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit 2"
+                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit 2 (20% ROI)"
                 emoji = "🔴" if hit_stop_loss else "🟢"
                 
                 # Se SL e breakeven_set=True, foi saída no breakeven (sem perda nem ganho)
                 if hit_stop_loss and breakeven_set:
-                    exit_type = "Breakeven (Stop Loss)"
+                    exit_type = "Breakeven (Stop Loss no preço de entrada)"
                     emoji = "🟡"
-                    log(f"🟡 SAÍDA NO BREAKEVEN DETECTADA!", "INFO")
+                    log(f"🟡 SAÍDA NO BREAKEVEN DETECTADA - SEM PERDA!", "INFO")
+                elif hit_stop_loss:
+                    log(f"🔴 STOP LOSS ATINGIDO - LIMITANDO PERDAS!", "WARN")
+                else:
+                    log(f"🟢 TP2 ATINGIDO - REALIZANDO LUCRO TOTAL!", "INFO")
                 
-                log(f"{emoji} {exit_type} atingido para {coin}!", "INFO")
+                log(f"", "INFO")
+                log(f"{emoji}{emoji}{emoji} {exit_type.upper()} {emoji}{emoji}{emoji}", "INFO")
                 log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
                 log(f"   💰 Preço saída: ${current_price:.4f}", "INFO")
-                log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
+                log(f"   � ROI final: {roi_current:+.2f}%", "INFO")
+                log(f"   📦 Quantidade: {amount_remaining:.4f} {coin} (100% restante)", "INFO")
                 
-                # Vender a quantidade restante (100% no caso do TP2)
+                # Vender a quantidade restante (100%)
                 exit_side = "sell" if signal == "LONG" else "buy"
                 amount_usd = amount_remaining * current_price
                 
-                log(f"📤 EXECUTANDO VENDA {exit_type.upper()}:", "INFO")
-                log(f"   Lado: {exit_side.upper()}", "INFO")
-                log(f"   Quantidade: {amount_remaining:.4f} {coin}", "INFO")
-                log(f"   Valor USD: ${amount_usd:.2f}", "INFO")
-                log(f"   Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                log(f"", "INFO")
+                log(f"📤 EXECUTANDO VENDA {exit_type.upper()} (REDUCE ONLY - SÓ FECHA):", "INFO")
+                log(f"   🔄 Lado da ordem: {exit_side.upper()} ({signal} fecha com {exit_side})", "INFO")
+                log(f"   🪙 Quantidade: {amount_remaining:.4f} {coin} (100% da posição restante)", "INFO")
+                log(f"   💵 Valor USD: ${amount_usd:.2f}", "INFO")
+                log(f"   📊 Leverage: {self.cfg.LEVERAGE}x", "INFO")
+                log(f"   🔒 ReduceOnly: TRUE (garante que só fecha, não inverte)", "INFO")
                 
                 success = self.exchange.create_market_order(
                     symbol,
                     exit_side,
                     amount_usd,
                     self.cfg.LEVERAGE,
-                    is_close=True  # Adiciona reduceOnly para não inverter posição
+                    is_close=True  # CRÍTICO: reduceOnly=True - só fecha, não inverte
                 )
                 
                 if success:
-                    log(f"✅ ORDEM {exit_type.upper()} EXECUTADA COM SUCESSO!", "INFO")
+                    log(f"", "INFO")
+                    log(f"✅✅✅ ORDEM {exit_type.upper()} EXECUTADA COM SUCESSO! ✅✅✅", "INFO")
+                    log(f"   🔒 Posição fechada com reduceOnly=True", "INFO")
+                    log(f"   💰 Resultado: {roi_current:+.2f}% ROI", "INFO")
+                    log(f"", "INFO")
                     
                     # Obter timestamp de entrada para calcular tempo no trade
                     entry_time = None
