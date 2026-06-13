@@ -1168,7 +1168,22 @@ class StateManager:
         }
         
         # Registrar no Google Sheets
-        sheets_logger.log_trade(trade_data)
+        log(f"📊 REGISTRANDO SAÍDA NA PLANILHA:", "INFO")
+        log(f"   Trade ID: {trade_id}", "INFO")
+        log(f"   Crypto: {crypto}", "INFO")
+        log(f"   Operação: {operation}", "INFO")
+        log(f"   Preço saída: ${price:.4f}", "INFO")
+        log(f"   Quantidade: {amount:.4f}", "INFO")
+        log(f"   P&L: ${pnl_usd:.2f} ({pnl_pct:+.2f}%)" if pnl_usd else "   P&L: N/A", "INFO")
+        log(f"   Motivo: {reason}", "INFO")
+        
+        try:
+            sheets_logger.log_trade(trade_data)
+            log(f"✅ Saída registrada na planilha com sucesso!", "INFO")
+        except Exception as e:
+            log(f"❌ ERRO ao registrar saída na planilha: {e}", "ERROR")
+            import traceback
+            log(traceback.format_exc(), "ERROR")
     
     def get_position_entry(self, index: int = -1) -> dict:
         """Retorna dados da entrada de posição (útil para vendas)"""
@@ -2097,6 +2112,13 @@ class TradingStrategy:
             if not tp1_hit:
                 hit_tp1 = tp1_atingido
                 
+                # CRÍTICO: Se TP2 atingido mas TP1 não, FORÇAR execução de TP1 primeiro
+                # Mesmo que preço tenha pulado direto para TP2
+                if tp2_atingido and not tp1_atingido:
+                    log(f"⚠️ PREÇO PULOU DIRETO PARA TP2 SEM PASSAR POR TP1!", "WARN")
+                    log(f"   💡 FORÇANDO EXECUÇÃO DE TP1 PRIMEIRO (50%)", "INFO")
+                    hit_tp1 = True  # Força TP1 mesmo preço não tendo passado exatamente por lá
+                
                 if hit_tp1:
                     log(f"", "INFO")
                     log(f"🎯🎯🎯 TP1 (10% ROI) ATINGIDO PARA {coin}! 🎯🎯🎯", "INFO")
@@ -2110,9 +2132,33 @@ class TradingStrategy:
                     exit_side = "sell" if signal == "LONG" else "buy"
                     amount_usd = amount_to_sell * current_price
                     
+                    # VERIFICAÇÃO CRÍTICA: Checar posição real no exchange antes de fechar
+                    log(f"", "INFO")
+                    log(f"🔍 VERIFICAÇÃO PRÉ-VENDA TP1:", "INFO")
+                    log(f"   📋 Signal no estado: {signal}", "INFO")
+                    
+                    real_position = self.exchange.get_position(symbol)
+                    if real_position:
+                        real_contracts = float(real_position.get("contracts", 0))
+                        real_side = "LONG" if real_contracts > 0 else "SHORT" if real_contracts < 0 else "NENHUMA"
+                        log(f"   📊 Posição real no exchange: {real_side} ({abs(real_contracts):.4f} {coin})", "INFO")
+                        
+                        # CORREÇÃO: Usar a posição REAL do exchange, não do estado
+                        if real_side == "LONG":
+                            exit_side = "sell"
+                            log(f"   ✅ POSIÇÃO LONG CONFIRMADA → Fechando com SELL", "INFO")
+                        elif real_side == "SHORT":
+                            exit_side = "buy"
+                            log(f"   ✅ POSIÇÃO SHORT CONFIRMADA → Fechando com BUY", "INFO")
+                        else:
+                            log(f"   ⚠️ NENHUMA POSIÇÃO ENCONTRADA NO EXCHANGE!", "WARN")
+                            return
+                    else:
+                        log(f"   ⚠️ Não foi possível verificar posição no exchange!", "WARN")
+                    
                     log(f"", "INFO")
                     log(f"📤 EXECUTANDO VENDA TP1 (REDUCE ONLY - SÓ FECHA):", "INFO")
-                    log(f"   🔄 Lado da ordem: {exit_side.upper()} ({signal} fecha com {exit_side})", "INFO")
+                    log(f"   🔄 Lado da ordem: {exit_side.upper()} (posição no exchange)", "INFO")
                     log(f"   🪙 Quantidade: {amount_to_sell:.4f} {coin} (50% da posição)", "INFO")
                     log(f"   💵 Valor USD: ${amount_usd:.2f}", "INFO")
                     log(f"   📊 Leverage: {self.cfg.LEVERAGE}x", "INFO")
@@ -2199,7 +2245,9 @@ class TradingStrategy:
                 log(f"✅ TP1 já foi executado anteriormente", "DEBUG")
             
             # ============================================================
-            # LÓGICA DE TP2 (20% - vende 100% da posição total)
+            # LÓGICA DE TP2 (20% ROI - vende 100% da posição RESTANTE)
+            # IMPORTANTE: Só executa TP2 se TP1 já foi executado
+            # Se TP2 atingido mas TP1 não, executa TP1 primeiro
             # ============================================================
             hit_tp2 = False
             if signal == "LONG":
@@ -2210,6 +2258,14 @@ class TradingStrategy:
                 if current_price <= take_profit_2_price:
                     hit_tp2 = True
                     log(f"🎯 CONDIÇÃO TP2 ATINGIDA! Preço ${current_price:.4f} <= TP2 ${take_profit_2_price:.4f}", "INFO")
+            
+            # Se TP2 atingido mas TP1 não foi executado, priorizar TP1 primeiro
+            if hit_tp2 and not tp1_hit:
+                log(f"⚠️ TP2 atingido mas TP1 ainda não foi executado!", "WARN")
+                log(f"   💡 Executando TP1 primeiro (50% da posição)", "INFO")
+                # Volta para executar TP1 no próximo ciclo
+                # Não executa TP2 agora
+                hit_tp2 = False
             
             # ============================================================
             # LÓGICA DE STOP LOSS (agora pode ser breakeven)
@@ -2250,10 +2306,39 @@ class TradingStrategy:
                 exit_side = "sell" if signal == "LONG" else "buy"
                 amount_usd = amount_remaining * current_price
                 
+                # VERIFICAÇÃO CRÍTICA: Checar posição real no exchange antes de fechar
+                log(f"", "INFO")
+                log(f"🔍 VERIFICAÇÃO PRÉ-VENDA:", "INFO")
+                log(f"   📋 Signal no estado: {signal}", "INFO")
+                
+                real_position = self.exchange.get_position(symbol)
+                if real_position:
+                    real_contracts = float(real_position.get("contracts", 0))
+                    real_side = "LONG" if real_contracts > 0 else "SHORT" if real_contracts < 0 else "NENHUMA"
+                    log(f"   📊 Posição real no exchange: {real_side} ({abs(real_contracts):.4f} {coin})", "INFO")
+                    
+                    # CORREÇÃO: Usar a posição REAL do exchange, não do estado
+                    if real_side == "LONG":
+                        exit_side = "sell"
+                        log(f"   ✅ POSIÇÃO LONG CONFIRMADA → Fechando com SELL", "INFO")
+                    elif real_side == "SHORT":
+                        exit_side = "buy"
+                        log(f"   ✅ POSIÇÃO SHORT CONFIRMADA → Fechando com BUY", "INFO")
+                    else:
+                        log(f"   ⚠️ NENHUMA POSIÇÃO ENCONTRADA NO EXCHANGE!", "WARN")
+                        return
+                else:
+                    log(f"   ⚠️ Não foi possível verificar posição no exchange!", "WARN")
+                
                 log(f"", "INFO")
                 log(f"📤 EXECUTANDO VENDA {exit_type.upper()} (REDUCE ONLY - SÓ FECHA):", "INFO")
-                log(f"   🔄 Lado da ordem: {exit_side.upper()} ({signal} fecha com {exit_side})", "INFO")
-                log(f"   🪙 Quantidade: {amount_remaining:.4f} {coin} (100% da posição restante)", "INFO")
+                log(f"   🔄 Lado da ordem: {exit_side.upper()} (posição no exchange)", "INFO")
+                if hit_tp2 and tp1_hit:
+                    log(f"   🪙 Quantidade: {amount_remaining:.4f} {coin} (50% restante após TP1)", "INFO")
+                elif hit_tp2 and not tp1_hit:
+                    log(f"   🪙 Quantidade: {amount_remaining:.4f} {coin} (100% - TP1 não foi executado)", "INFO")
+                else:
+                    log(f"   🪙 Quantidade: {amount_remaining:.4f} {coin} (100% da posição)", "INFO")
                 log(f"   💵 Valor USD: ${amount_usd:.2f}", "INFO")
                 log(f"   📊 Leverage: {self.cfg.LEVERAGE}x", "INFO")
                 log(f"   🔒 ReduceOnly: TRUE (garante que só fecha, não inverte)", "INFO")
