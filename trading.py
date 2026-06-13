@@ -511,9 +511,15 @@ class TradingConfig:
     ATR_PERIOD: int = 14                 # Período para calcular ATR
     ATR_SL_MULTIPLIER: float = 1.5       # Stop Loss = 1.5x ATR (adaptativo)
     
-    # TAKE PROFITS FIXOS (conforme especificação)
-    TAKE_PROFIT_1_PCT: float = 10.0      # TP1: 10% fixo (vende 50% da posição)
-    TAKE_PROFIT_2_PCT: float = 20.0      # TP2: 20% fixo (vende 100% - toda a posição)
+    # FILTRO DE REGIME DE MERCADO (Tendência vs Lateralidade)
+    EMA_NEUTRAL_ZONE_PCT: float = 1.5    # Zona neutra ao redor da EMA 200 (1.5%)
+    
+    # CONFIRMAÇÃO POR VOLUME
+    MIN_VOLUME_RATIO: float = 1.2        # Volume deve ser > 1.2x a média para validar sinal
+    
+    # TAKE PROFITS FIXOS (alongados para maior potencial)
+    TAKE_PROFIT_1_PCT: float = 15.0      # TP1: 15% fixo (vende 50% da posição)
+    TAKE_PROFIT_2_PCT: float = 40.0      # TP2: 40% fixo (vende 100% - toda a posição)
     
     # Fallback apenas para stop loss
     STOP_LOSS_PRICE_PCT: float = 2.0     # Fallback: 2% no preço se ATR falhar
@@ -791,20 +797,20 @@ class StateManager:
             
             # Calcular Take Profits FIXOS considerando ALAVANCAGEM
             # Com 5x alavancagem:
-            # - TP1: 10% de ganho no capital = 2% de movimento no preço (10% / 5)
-            # - TP2: 20% de ganho no capital = 4% de movimento no preço (20% / 5)
+            # - TP1: 15% de ganho no capital = 3% de movimento no preço (15% / 5)
+            # - TP2: 40% de ganho no capital = 8% de movimento no preço (40% / 5)
             leverage = 5  # Alavancagem usada
-            tp1_price_move = 0.10 / leverage  # 10% / 5 = 2% no preço
-            tp2_price_move = 0.20 / leverage  # 20% / 5 = 4% no preço
+            tp1_price_move = 0.15 / leverage  # 15% / 5 = 3% no preço
+            tp2_price_move = 0.40 / leverage  # 40% / 5 = 8% no preço
             
             if operation == "LONG":
-                take_profit_1_price = entry_price * (1 + tp1_price_move)  # +2%
-                take_profit_2_price = entry_price * (1 + tp2_price_move)  # +4%
+                take_profit_1_price = entry_price * (1 + tp1_price_move)  # +3%
+                take_profit_2_price = entry_price * (1 + tp2_price_move)  # +8%
             else:  # SHORT
-                take_profit_1_price = entry_price * (1 - tp1_price_move)  # -2%
-                take_profit_2_price = entry_price * (1 - tp2_price_move)  # -4%
+                take_profit_1_price = entry_price * (1 - tp1_price_move)  # -3%
+                take_profit_2_price = entry_price * (1 - tp2_price_move)  # -8%
             
-            log(f"   ✅ Usando Take Profits com ALAVANCAGEM {leverage}x (TP1: {tp1_price_move*100:.1f}% preço = 10% capital, TP2: {tp2_price_move*100:.1f}% preço = 20% capital)", "INFO")
+            log(f"   ✅ Usando Take Profits com ALAVANCAGEM {leverage}x (TP1: {tp1_price_move*100:.1f}% preço = 15% capital, TP2: {tp2_price_move*100:.1f}% preço = 40% capital)", "INFO")
             
             # Determinar símbolo (assumir SOL se não especificado)
             symbol = "SOL/USDC:USDC"  # Default
@@ -871,7 +877,8 @@ class StateManager:
     def record_buy(self, price: float, amount: float, crypto: str = "SOL", operation: str = "LONG", 
                    rsi: float = None, atr: float = None, stop_loss: float = None, 
                    take_profit_1: float = None, take_profit_2: float = None,
-                   ema_trend: str = None, atr_percentile: float = None, volume_ratio: float = None):
+                   ema_trend: str = None, atr_percentile: float = None, volume_ratio: float = None,
+                   market_regime: str = None):
         """
         Registra uma compra com DADOS COMPLETOS para análise quantitativa
         
@@ -888,6 +895,7 @@ class StateManager:
             ema_trend: Tendência EMA ("Bullish", "Bearish", "Neutral")
             atr_percentile: Percentil do ATR (0-100)
             volume_ratio: Ratio volume atual/médio
+            market_regime: Regime de mercado ("TENDÊNCIA ALTA", "TENDÊNCIA BAIXA", "LATERAL (RANGE)")
         """
         now = datetime.now()
         
@@ -984,6 +992,7 @@ class StateManager:
             'atr': atr,
             'atr_percentile': atr_percentile,
             'volume_ratio': volume_ratio,
+            'market_regime': market_regime if market_regime else "-",  # NOVO: regime de mercado
             
             # Execução - Preços e Posição
             'entry_price': price,
@@ -1694,7 +1703,14 @@ class TradingStrategy:
             return 0.0
     
     def analyze_asset(self, symbol: str) -> Dict[str, Any]:
-        """Analisa um asset específico e determina se deve entrar LONG ou SHORT"""
+        """Analisa um asset específico e determina se deve entrar LONG ou SHORT
+        
+        NOVA LÓGICA:
+        1. Calcula EMA 200 e Zona Neutra (±1.5%)
+        2. Determina Regime de Mercado (Tendência Alta, Baixa ou Lateral)
+        3. Aplica regras de validação RSI + EMA
+        4. Valida volume (deve ser > 1.2x média)
+        """
         # Buscar dados históricos
         df = self.exchange.fetch_historical_data(symbol, self.cfg.HISTORICAL_DAYS)
         
@@ -1705,6 +1721,9 @@ class TradingStrategy:
         # Calcular indicadores
         rsi = self.calculate_rsi(df, period=self.cfg.RSI_PERIOD)
         
+        # Calcular EMA 200
+        ema_200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        
         # Preço atual
         current_price = self.exchange.get_current_price(symbol)
         
@@ -1712,15 +1731,67 @@ class TradingStrategy:
             log(f"❌ Preço inválido para {symbol}", "ERROR")
             return {}
         
+        # ===== FILTRO DE REGIME DE MERCADO =====
+        # Calcular Zona Neutra ao redor da EMA 200
+        ema_200_upper = ema_200 * (1 + (self.cfg.EMA_NEUTRAL_ZONE_PCT / 100))
+        ema_200_lower = ema_200 * (1 - (self.cfg.EMA_NEUTRAL_ZONE_PCT / 100))
+        
+        # Determinar regime de mercado
+        market_regime = None
+        if current_price > ema_200_upper:
+            market_regime = "TENDÊNCIA ALTA"
+        elif current_price < ema_200_lower:
+            market_regime = "TENDÊNCIA BAIXA"
+        else:
+            market_regime = "LATERAL (RANGE)"
+        
+        # ===== VALIDAÇÃO POR VOLUME =====
+        volume_ratio = None
+        volume_ok = False
+        if 'volume' in df.columns and len(df) > 0:
+            current_volume = df['volume'].iloc[-1]
+            avg_volume = df['volume'].mean()
+            if avg_volume > 0:
+                volume_ratio = current_volume / avg_volume
+                volume_ok = volume_ratio >= self.cfg.MIN_VOLUME_RATIO
+        
         # Posição atual neste asset
         position = self.exchange.get_position(symbol)
         
-        # Determinar sinal de entrada baseado apenas no RSI
-        signal = None
+        # ===== DETERMINAR SINAL COM NOVAS REGRAS =====
+        signal_rsi = None  # Sinal puro do RSI
+        signal_final = None  # Sinal após filtros
+        
+        # 1. Sinal puro do RSI
         if rsi < self.cfg.RSI_LONG_THRESHOLD:
-            signal = "LONG"  # RSI sobrevendido
+            signal_rsi = "LONG"
         elif rsi > self.cfg.RSI_SHORT_THRESHOLD:
-            signal = "SHORT"  # RSI sobrecomprado
+            signal_rsi = "SHORT"
+        
+        # 2. Aplicar filtro de Regime de Mercado + Volume
+        if signal_rsi:
+            # Verificar se o sinal é válido para o regime atual
+            signal_valid_by_regime = False
+            regime_block_reason = None
+            
+            if market_regime == "TENDÊNCIA ALTA":
+                if signal_rsi == "LONG":
+                    signal_valid_by_regime = True
+                else:
+                    regime_block_reason = "SHORT bloqueado em tendência de alta"
+            elif market_regime == "TENDÊNCIA BAIXA":
+                if signal_rsi == "SHORT":
+                    signal_valid_by_regime = True
+                else:
+                    regime_block_reason = "LONG bloqueado em tendência de baixa"
+            else:  # LATERAL
+                signal_valid_by_regime = True  # Aceita ambos sinais em mercado lateral
+            
+            # Validar volume
+            if signal_valid_by_regime and volume_ok:
+                signal_final = signal_rsi
+            elif signal_valid_by_regime and not volume_ok:
+                regime_block_reason = f"Volume insuficiente (ratio={volume_ratio:.2f} < {self.cfg.MIN_VOLUME_RATIO})"
         
         coin = symbol.split('/')[0]
         
@@ -1729,15 +1800,33 @@ class TradingStrategy:
             "coin": coin,
             "current_price": current_price,
             "rsi": rsi,
-            "signal": signal,
+            "ema_200": ema_200,
+            "ema_200_upper": ema_200_upper,
+            "ema_200_lower": ema_200_lower,
+            "market_regime": market_regime,
+            "volume_ratio": volume_ratio,
+            "volume_ok": volume_ok,
+            "signal_rsi": signal_rsi,
+            "signal": signal_final,
+            "regime_block_reason": regime_block_reason,
             "position": position,
             "has_position": position is not None,
-            "data": df,  # Adicionar DataFrame para cálculo de ATR
+            "data": df,
         }
         
-        # Log da análise
+        # Log da análise com NOVAS MÉTRICAS
         log(f"", "INFO")
-        log(f"📊 {coin}: Preço=${current_price:.4f} | RSI={rsi:.1f} | Sinal: {signal if signal else 'NENHUM'}", "INFO")
+        log(f"📊 {coin}: Preço=${current_price:.4f} | RSI={rsi:.1f} | Regime: {market_regime}", "INFO")
+        log(f"   EMA 200: ${ema_200:.4f} | Zona: [${ema_200_lower:.4f} - ${ema_200_upper:.4f}]", "INFO")
+        if volume_ratio:
+            log(f"   Volume Ratio: {volume_ratio:.2f}x {'✅ OK' if volume_ok else '❌ Baixo'}", "INFO")
+        
+        if signal_rsi and not signal_final:
+            log(f"   🚫 Sinal RSI {signal_rsi} BLOQUEADO: {regime_block_reason}", "WARN")
+        elif signal_final:
+            log(f"   ✅ Sinal VALIDADO: {signal_final}", "INFO")
+        else:
+            log(f"   Sinal: NENHUM", "INFO")
         
         # Se tem posição, calcular % de ganho
         if position:
@@ -1787,9 +1876,17 @@ class TradingStrategy:
         
         signal = analysis["signal"]
         rsi = analysis["rsi"]
+        market_regime = analysis.get("market_regime", "DESCONHECIDO")
+        ema_200 = analysis.get("ema_200")
+        volume_ratio = analysis.get("volume_ratio")
         
         log(f"🚨 SINAL DE ENTRADA {signal}: {analysis['coin']}", "INFO")
         log(f"   RSI: {rsi:.1f}", "INFO")
+        log(f"   Regime: {market_regime}", "INFO")
+        if ema_200:
+            log(f"   EMA 200: ${ema_200:.4f}", "INFO")
+        if volume_ratio:
+            log(f"   Volume Ratio: {volume_ratio:.2f}x", "INFO")
         return True
     
     def execute_entry(self, analysis: Dict) -> bool:
@@ -1894,23 +1991,26 @@ class TradingStrategy:
                 stop_loss_roi = self.cfg.STOP_LOSS_PRICE_PCT * self.cfg.LEVERAGE
             
             # Take Profits: considerar ALAVANCAGEM
-            # Com 5x: TP1 10% capital = 2% preço, TP2 20% capital = 4% preço
-            tp1_price_move = self.cfg.TAKE_PROFIT_1_PCT / 100.0 / self.cfg.LEVERAGE  # 10% / 5 = 2%
-            tp2_price_move = self.cfg.TAKE_PROFIT_2_PCT / 100.0 / self.cfg.LEVERAGE  # 20% / 5 = 4%
+            # NOVOS VALORES: TP1 15% capital, TP2 40% capital
+            # Com 5x: TP1 15% capital = 3% preço, TP2 40% capital = 8% preço
+            tp1_price_move = self.cfg.TAKE_PROFIT_1_PCT / 100.0 / self.cfg.LEVERAGE  # 15% / 5 = 3%
+            tp2_price_move = self.cfg.TAKE_PROFIT_2_PCT / 100.0 / self.cfg.LEVERAGE  # 40% / 5 = 8%
             
             if signal == "LONG":
-                take_profit_1_price = current_price * (1 + tp1_price_move)  # +2%
-                take_profit_2_price = current_price * (1 + tp2_price_move)  # +4%
+                take_profit_1_price = current_price * (1 + tp1_price_move)  # +3%
+                take_profit_2_price = current_price * (1 + tp2_price_move)  # +8%
             else:  # SHORT
-                take_profit_1_price = current_price * (1 - tp1_price_move)  # -2%
-                take_profit_2_price = current_price * (1 - tp2_price_move)  # -4%
+                take_profit_1_price = current_price * (1 - tp1_price_move)  # -3%
+                take_profit_2_price = current_price * (1 - tp2_price_move)  # -8%
             
-            take_profit_1_roi = self.cfg.TAKE_PROFIT_1_PCT  # 10% no capital
-            take_profit_2_roi = self.cfg.TAKE_PROFIT_2_PCT  # 20% no capital
+            take_profit_1_roi = self.cfg.TAKE_PROFIT_1_PCT  # 15% no capital
+            take_profit_2_roi = self.cfg.TAKE_PROFIT_2_PCT  # 40% no capital
             
-            log(f"✅ Take Profits com ALAVANCAGEM {self.cfg.LEVERAGE}x: TP1={tp1_price_move*100:.1f}% preço (10% capital), TP2={tp2_price_move*100:.1f}% preço (20% capital)", "INFO")
+            log(f"✅ Take Profits com ALAVANCAGEM {self.cfg.LEVERAGE}x: TP1={tp1_price_move*100:.1f}% preço ({self.cfg.TAKE_PROFIT_1_PCT}% capital), TP2={tp2_price_move*100:.1f}% preço ({self.cfg.TAKE_PROFIT_2_PCT}% capital)", "INFO")
             
-            # Registrar entrada com TODOS os dados
+            # Registrar entrada com TODOS os dados (incluindo market_regime)
+            market_regime = analysis.get("market_regime", "DESCONHECIDO")
+            
             trade_id = self.state.record_buy(
                 price=current_price,
                 amount=amount_coins,
@@ -1923,7 +2023,8 @@ class TradingStrategy:
                 take_profit_2=take_profit_2_price,
                 ema_trend=ema_trend,
                 atr_percentile=atr_percentile,
-                volume_ratio=volume_ratio
+                volume_ratio=volume_ratio,
+                market_regime=market_regime
             )
             
             log(f"", "INFO")
