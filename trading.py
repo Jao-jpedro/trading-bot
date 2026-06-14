@@ -1761,6 +1761,7 @@ class TradingStrategy:
         # ===== DETERMINAR SINAL COM NOVAS REGRAS =====
         signal_rsi = None  # Sinal puro do RSI
         signal_final = None  # Sinal após filtros
+        regime_block_reason = None  # Motivo de bloqueio (se houver)
         
         # 1. Sinal puro do RSI
         if rsi < self.cfg.RSI_LONG_THRESHOLD:
@@ -1772,7 +1773,6 @@ class TradingStrategy:
         if signal_rsi:
             # Verificar se o sinal é válido para o regime atual
             signal_valid_by_regime = False
-            regime_block_reason = None
             
             if market_regime == "TENDÊNCIA ALTA":
                 if signal_rsi == "LONG":
