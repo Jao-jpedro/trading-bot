@@ -1313,7 +1313,7 @@ class ExchangeConnector:
         log("✅ Conexões estabelecidas: Hyperliquid (dados + execução)", "INFO")
     
     def fetch_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
-        """Busca dados históricos com cache (evita rate limit)"""
+        """Busca dados históricos com cache e retry com exponential backoff"""
         try:
             coin = symbol.split('/')[0]
             cache_key = f"{symbol}_{days}"
@@ -1327,27 +1327,68 @@ class ExchangeConnector:
                     log(f"📊 Usando dados em cache de {coin} ({age/60:.1f} min atrás)", "DEBUG")
                     return cached_data
             
-            # Cache expirado ou não existe - buscar novos dados
+            # Cache expirado ou não existe - buscar novos dados COM RETRY
             timeframe = self.cfg.TIMEFRAME
             limit = days * 24 + 50
             since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
             
             log(f"📊 Buscando dados históricos de {coin} na Hyperliquid...", "DEBUG")
             
-            # Adicionar delay ANTES da requisição para evitar rate limit
-            log(f"⏳ Aguardando 2s antes de buscar dados (evitar rate limit)...", "DEBUG")
-            time.sleep(2.0)  # 2 segundos entre requisições
+            # Sistema de Retry com Exponential Backoff
+            max_retries = 3
+            ohlcv = None
             
-            # Buscar da Hyperliquid
-            ohlcv = self.hyperliquid.fetch_ohlcv(
-                symbol,
-                timeframe=timeframe,
-                since=since,
-                limit=limit
-            )
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # Adicionar delay ANTES da requisição para evitar rate limit
+                    if attempt == 1:
+                        log(f"⏳ Aguardando 2s antes de buscar dados (evitar rate limit)...", "DEBUG")
+                        time.sleep(2.0)
+                    
+                    # Buscar da Hyperliquid
+                    ohlcv = self.hyperliquid.fetch_ohlcv(
+                        symbol,
+                        timeframe=timeframe,
+                        since=since,
+                        limit=limit
+                    )
+                    
+                    # Sucesso - sair do loop
+                    break
+                    
+                except ccxt.RateLimitExceeded as e:
+                    if attempt < max_retries:
+                        wait_time = 2 * attempt  # Exponential: 2s, 4s, 6s
+                        log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
+                        time.sleep(wait_time)
+                    else:
+                        log(f"❌ Rate limit persistente após {max_retries} tentativas: {e}", "ERROR")
+                        raise  # Re-raise para cair no except externo
+                        
+                except Exception as e:
+                    # Verificar se é 429 na mensagem de erro
+                    if "429" in str(e):
+                        if attempt < max_retries:
+                            wait_time = 2 * attempt
+                            log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
+                            time.sleep(wait_time)
+                        else:
+                            log(f"❌ Rate limit persistente após {max_retries} tentativas: {e}", "ERROR")
+                            raise
+                    else:
+                        # Outro tipo de erro - re-raise imediatamente
+                        raise
             
             if not ohlcv or len(ohlcv) == 0:
                 log(f"⚠️ Nenhum dado histórico retornado para {coin}", "WARN")
+                
+                # Tentar usar cache expirado como último recurso
+                if cache_key in self._cache:
+                    cached_data, cached_time = self._cache[cache_key]
+                    age = time.time() - cached_time
+                    log(f"⚠️ Usando dados em cache expirado ({age/60:.1f} min) como último recurso", "WARN")
+                    return cached_data
+                
                 return pd.DataFrame()
             
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1362,10 +1403,18 @@ class ExchangeConnector:
             
         except Exception as e:
             log(f"❌ Erro buscando dados históricos {symbol}: {e}", "ERROR")
+            
+            # Último recurso: cache expirado
+            if cache_key in self._cache:
+                cached_data, cached_time = self._cache[cache_key]
+                age = time.time() - cached_time
+                log(f"⚠️ Usando dados em cache expirado ({age/60:.1f} min) como último recurso", "WARN")
+                return cached_data
+            
             return pd.DataFrame()
     
     def get_current_price(self, symbol: str) -> float:
-        """Busca preço atual de um símbolo com cache"""
+        """Busca preço atual de um símbolo com cache e retry com exponential backoff"""
         try:
             coin = symbol.split('/')[0]
             cache_key = f"price_{symbol}"
@@ -1379,22 +1428,55 @@ class ExchangeConnector:
                     log(f"💰 Preço {coin} em cache: ${cached_price:.4f} ({age:.1f}s atrás)", "DEBUG")
                     return cached_price
             
-            # Adicionar delay antes de buscar preço
-            time.sleep(0.5)  # 500ms entre requisições
+            # Sistema de Retry com Exponential Backoff
+            max_retries = 3
+            price = None
             
-            # Buscar direto da Hyperliquid
-            ticker = self.hyperliquid.fetch_ticker(symbol)
-            price = ticker['last']
+            for attempt in range(1, max_retries + 1):
+                try:
+                    # Adicionar delay antes de buscar preço
+                    if attempt == 1:
+                        time.sleep(0.5)  # 500ms entre requisições
+                    
+                    # Buscar direto da Hyperliquid
+                    ticker = self.hyperliquid.fetch_ticker(symbol)
+                    price = ticker['last']
+                    
+                    # Sucesso - salvar no cache e retornar
+                    self._cache[cache_key] = (price, time.time())
+                    log(f"💰 Preço atual {coin}: ${price:.4f}", "DEBUG")
+                    return price
+                    
+                except ccxt.RateLimitExceeded as e:
+                    if attempt < max_retries:
+                        wait_time = 2 * attempt  # Exponential: 2s, 4s, 6s
+                        log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
+                        time.sleep(wait_time)
+                    else:
+                        log(f"❌ Rate limit persistente após {max_retries} tentativas: {e}", "ERROR")
+                        raise  # Re-raise para cair no except externo
+                        
+                except Exception as e:
+                    # Verificar se é 429 na mensagem de erro
+                    if "429" in str(e):
+                        if attempt < max_retries:
+                            wait_time = 2 * attempt
+                            log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
+                            time.sleep(wait_time)
+                        else:
+                            log(f"❌ Rate limit persistente após {max_retries} tentativas: {e}", "ERROR")
+                            raise
+                    else:
+                        # Outro tipo de erro - re-raise imediatamente
+                        raise
             
-            # Salvar no cache
-            self._cache[cache_key] = (price, time.time())
+            # Se chegou aqui sem sucesso, retornar 0.0
+            return 0.0
             
-            log(f"💰 Preço atual {coin}: ${price:.4f}", "DEBUG")
-            return price
         except Exception as e:
             log(f"❌ Erro buscando preço {symbol}: {e}", "ERROR")
             
-            # Tentar usar preço do cache mesmo expirado
+            # Tentar usar preço do cache mesmo expirado (último recurso)
             cache_key = f"price_{symbol}"
             if cache_key in self._cache:
                 cached_price, cached_time = self._cache[cache_key]
