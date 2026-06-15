@@ -1313,8 +1313,14 @@ class ExchangeConnector:
         log("✅ Conexões estabelecidas: Hyperliquid (dados + execução)", "INFO")
     
     def fetch_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
-        """Busca dados históricos com cache e retry com exponential backoff"""
+        """Busca dados históricos da BINANCE (oráculo) com cache e retry
+        
+        IMPORTANTE: Usa Binance como fonte de dados para evitar rate limit da Hyperliquid
+        - Hyperliquid: SOL/USDC:USDC → Binance: SOL/USDT
+        - Hyperliquid mantém-se apenas para execução de ordens
+        """
         try:
+            # Extrair moeda base do símbolo Hyperliquid (ex: "SOL/USDC:USDC" → "SOL")
             coin = symbol.split('/')[0]
             cache_key = f"{symbol}_{days}"
             
@@ -1327,12 +1333,16 @@ class ExchangeConnector:
                     log(f"📊 Usando dados em cache de {coin} ({age/60:.1f} min atrás)", "DEBUG")
                     return cached_data
             
-            # Cache expirado ou não existe - buscar novos dados COM RETRY
+            # Cache expirado ou não existe - buscar novos dados da BINANCE
             timeframe = self.cfg.TIMEFRAME
             limit = days * 24 + 50
             since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
             
-            log(f"📊 Buscando dados históricos de {coin} na Hyperliquid...", "DEBUG")
+            # Traduzir símbolo: Hyperliquid (SOL/USDC:USDC) → Binance (SOL/USDT)
+            binance_symbol = f"{coin}/USDT"
+            
+            log(f"📊 Buscando dados históricos de {coin} na BINANCE (oráculo)...", "DEBUG")
+            log(f"   Tradução: {symbol} → {binance_symbol}", "DEBUG")
             
             # Sistema de Retry com Exponential Backoff
             max_retries = 3
@@ -1340,29 +1350,31 @@ class ExchangeConnector:
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    # Adicionar delay ANTES da requisição para evitar rate limit
-                    if attempt == 1:
-                        log(f"⏳ Aguardando 2s antes de buscar dados (evitar rate limit)...", "DEBUG")
-                        time.sleep(2.0)
+                    # Instanciar conexão pública com Binance (sem autenticação)
+                    binance = ccxt.binance({
+                        'options': {'defaultType': 'spot'},
+                        'enableRateLimit': True
+                    })
                     
-                    # Buscar da Hyperliquid
-                    ohlcv = self.hyperliquid.fetch_ohlcv(
-                        symbol,
+                    # Buscar dados históricos da BINANCE
+                    ohlcv = binance.fetch_ohlcv(
+                        binance_symbol,
                         timeframe=timeframe,
                         since=since,
                         limit=limit
                     )
                     
                     # Sucesso - sair do loop
+                    log(f"✅ Dados históricos obtidos da Binance com sucesso", "DEBUG")
                     break
                     
                 except ccxt.RateLimitExceeded as e:
                     if attempt < max_retries:
                         wait_time = 2 * attempt  # Exponential: 2s, 4s, 6s
-                        log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
+                        log(f"[WARN] Rate limit Binance atingido, aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
                         time.sleep(wait_time)
                     else:
-                        log(f"❌ Rate limit persistente após {max_retries} tentativas: {e}", "ERROR")
+                        log(f"❌ Rate limit Binance persistente após {max_retries} tentativas: {e}", "ERROR")
                         raise  # Re-raise para cair no except externo
                         
                 except Exception as e:
@@ -1377,10 +1389,11 @@ class ExchangeConnector:
                             raise
                     else:
                         # Outro tipo de erro - re-raise imediatamente
+                        log(f"❌ Erro buscando dados da Binance: {e}", "ERROR")
                         raise
             
             if not ohlcv or len(ohlcv) == 0:
-                log(f"⚠️ Nenhum dado histórico retornado para {coin}", "WARN")
+                log(f"⚠️ Nenhum dado histórico retornado da Binance para {coin}", "WARN")
                 
                 # Tentar usar cache expirado como último recurso
                 if cache_key in self._cache:
@@ -1397,7 +1410,8 @@ class ExchangeConnector:
             # Salvar no cache
             self._cache[cache_key] = (df, time.time())
             
-            log(f"📊 Dados históricos {coin} ({timeframe}): {len(df)} candles, {df['timestamp'].min()} até {df['timestamp'].max()}", "INFO")
+            log(f"📊 Dados históricos {coin} ({timeframe}): {len(df)} candles da BINANCE", "INFO")
+            log(f"   Período: {df['timestamp'].min()} até {df['timestamp'].max()}", "DEBUG")
             
             return df
             
