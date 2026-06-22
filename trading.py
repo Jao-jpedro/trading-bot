@@ -49,7 +49,14 @@ def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry
     
     try:
         _LAST_REQUEST_TIME = time.time()
+        
+        # Log da requisição
+        request_type = payload.get("type", "unknown")
+        print(f"[DEBUG] HTTP POST → {url} | Type: {request_type} | Retry: {retry_count}/{_MAX_RETRIES}")
+        
         r = _SESSION.post(url, json=payload, timeout=timeout)
+        
+        print(f"[DEBUG] HTTP Response: Status {r.status_code} | Length: {len(r.text)} bytes")
         
         # Se receber 429 (rate limit), fazer retry com backoff exponencial
         if r.status_code == 429:
@@ -63,7 +70,12 @@ def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry
                 return None
         
         r.raise_for_status()
-        return r.json()
+        response_data = r.json()
+        
+        print(f"[DEBUG] Response parsed successfully. Type: {type(response_data).__name__}")
+        
+        return response_data
+        
     except requests.exceptions.HTTPError as e:
         if retry_count < _MAX_RETRIES and e.response and e.response.status_code >= 500:
             # Erro de servidor, tentar novamente
@@ -71,19 +83,35 @@ def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry
             print(f"[WARN] Erro de servidor ({e.response.status_code}), aguardando {wait_time}s antes de retry...")
             time.sleep(wait_time)
             return _http_post_json(url, payload, timeout, retry_count + 1)
-        print(f"[WARN] Requisição falhou: {e}")
+        print(f"[ERROR] Requisição falhou (HTTP {e.response.status_code if e.response else 'N/A'}): {e}")
+        return None
+    except requests.exceptions.Timeout as e:
+        print(f"[ERROR] Timeout na requisição após {timeout}s: {e}")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        print(f"[ERROR] Erro de conexão: {e}")
         return None
     except Exception as e:
-        print(f"[WARN] Requisição falhou: {e}")
+        print(f"[ERROR] Requisição falhou (tipo: {type(e).__name__}): {e}")
         return None
 
 def _hl_get_account_value(wallet: str) -> float:
     """Busca o saldo DISPONÍVEL de uma conta/vault específica via API Hyperliquid"""
     if not wallet:
+        log(f"❌ [get_account_value] Wallet address vazio", "ERROR")
         return 0.0
+    
+    log(f"🔍 [get_account_value] Buscando saldo para wallet: {wallet[:10]}...", "DEBUG")
+    
     data = _http_post_json(_HL_INFO_URL, {"type": "clearinghouseState", "user": wallet})
+    
+    if not data:
+        log(f"❌ [get_account_value] Resposta vazia da API Hyperliquid", "ERROR")
+        return 0.0
+    
     try:
-        if not data or "marginSummary" not in data:
+        if "marginSummary" not in data:
+            log(f"❌ [get_account_value] Campo 'marginSummary' ausente. Resposta: {list(data.keys())}", "ERROR")
             return 0.0
         
         margin_summary = data["marginSummary"]
@@ -94,9 +122,12 @@ def _hl_get_account_value(wallet: str) -> float:
         
         available = account_value - margin_used
         
+        log(f"✅ [get_account_value] Account Value: ${account_value:.2f}, Margin Used: ${margin_used:.2f}, Available: ${available:.2f}", "DEBUG")
+        
         return max(available, 0.0)  # Garantir que não seja negativo
     except Exception as e:
-        print(f"[ERROR] Erro parseando saldo: {e}")
+        log(f"❌ [get_account_value] Erro parseando saldo: {e}", "ERROR")
+        log(f"   Dados recebidos: {data}", "DEBUG")
         return 0.0
 
 def _hl_get_latest_fill(wallet: str, symbol: str = None):
@@ -120,8 +151,19 @@ def _hl_get_latest_fill(wallet: str, symbol: str = None):
 def _hl_get_user_state(wallet: str):
     """Busca estado completo do usuário incluindo posições abertas"""
     if not wallet:
+        log(f"❌ [get_user_state] Wallet address vazio", "ERROR")
         return None
+    
+    log(f"🔍 [get_user_state] Buscando estado para wallet: {wallet[:10]}...", "DEBUG")
+    
     data = _http_post_json(_HL_INFO_URL, {"type": "clearinghouseState", "user": wallet})
+    
+    if not data:
+        log(f"❌ [get_user_state] Resposta vazia da API Hyperliquid", "ERROR")
+        return None
+    
+    log(f"✅ [get_user_state] Estado recebido. Campos: {list(data.keys())}", "DEBUG")
+    
     return data
 
 def _hl_get_user_fills(wallet: str, limit: int = 100):
@@ -1288,6 +1330,11 @@ class ExchangeConnector:
         private_key = os.getenv("HYPERLIQUID_PRIVATE_KEY", "")  # Usar APENAS esta variável
         vault_address = os.getenv("HYPERLIQUID_SUBACCOUNT", "")  # Subconta
         
+        log(f"🔍 [INIT] Verificando variáveis de ambiente:", "DEBUG")
+        log(f"   WALLET_ADDRESS: {'✅ Presente' if wallet_address else '❌ Ausente'}", "DEBUG")
+        log(f"   HYPERLIQUID_PRIVATE_KEY: {'✅ Presente' if private_key else '❌ Ausente'}", "DEBUG")
+        log(f"   HYPERLIQUID_SUBACCOUNT: {'✅ Presente' if vault_address else '❌ Ausente'}", "DEBUG")
+        
         if not wallet_address or not private_key:
             raise ValueError("WALLET_ADDRESS e HYPERLIQUID_PRIVATE_KEY devem estar configurados")
         
@@ -1298,11 +1345,15 @@ class ExchangeConnector:
         log(f"🔑 Carteira principal (assinatura): {wallet_address}", "INFO")
         log(f"🔐 Private key configurada: {private_key[:10]}...{private_key[-4:]}", "DEBUG")
         
+        log(f"🔧 [INIT] Inicializando conexão CCXT Hyperliquid...", "DEBUG")
+        
         self.hyperliquid = ccxt.hyperliquid({
             'walletAddress': wallet_address,
             'privateKey': private_key,
             'enableRateLimit': True,
         })
+        
+        log(f"✅ [INIT] CCXT Hyperliquid inicializado", "DEBUG")
         
         # SEMPRE usar subconta (obrigatório)
         self.hyperliquid.options['vaultAddress'] = vault_address
@@ -1310,6 +1361,7 @@ class ExchangeConnector:
         # Wallet address é SEMPRE a vault (subconta)
         self.wallet_address = vault_address
         
+        log(f"✅ [INIT] Wallet address definido para consultas: {self.wallet_address}", "DEBUG")
         log("✅ Conexões estabelecidas: Hyperliquid (dados + execução)", "INFO")
     
     def fetch_historical_data(self, symbol: str, days: int) -> pd.DataFrame:
