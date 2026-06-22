@@ -96,39 +96,69 @@ def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry
         return None
 
 def _hl_get_account_value(wallet: str) -> float:
-    """Busca o saldo DISPONÍVEL de uma conta/vault específica via API Hyperliquid"""
+    """Busca o saldo DISPONÍVEL de uma conta/vault específica via API Hyperliquid
+    
+    IMPORTANTE: Hyperliquid separa SPOT e PERPETUALS!
+    - Spot: Mercado à vista (USDC, tokens)
+    - Perps: Futuros perpétuos (leverage)
+    
+    O bot precisa SOMAR ambos para obter saldo total disponível.
+    """
     if not wallet:
         log(f"❌ [get_account_value] Wallet address vazio", "ERROR")
         return 0.0
     
     log(f"🔍 [get_account_value] Buscando saldo para wallet: {wallet[:10]}...", "DEBUG")
     
-    data = _http_post_json(_HL_INFO_URL, {"type": "clearinghouseState", "user": wallet})
+    # 1. BUSCAR SALDO EM PERPETUALS
+    perp_data = _http_post_json(_HL_INFO_URL, {"type": "clearinghouseState", "user": wallet})
+    perp_available = 0.0
     
-    if not data:
-        log(f"❌ [get_account_value] Resposta vazia da API Hyperliquid", "ERROR")
-        return 0.0
+    if perp_data:
+        try:
+            # Em perps, o saldo livre está em 'withdrawable'
+            perp_available = float(perp_data.get("withdrawable", 0))
+            
+            # Logging detalhado
+            margin_summary = perp_data.get("marginSummary", {})
+            account_value = float(margin_summary.get("accountValue", 0))
+            margin_used = float(margin_summary.get("totalMarginUsed", 0))
+            
+            log(f"� [PERPS] Withdrawable: ${perp_available:.2f}, AccountValue: ${account_value:.2f}, MarginUsed: ${margin_used:.2f}", "DEBUG")
+        except Exception as e:
+            log(f"⚠️ [get_account_value] Erro parseando saldo PERPS: {e}", "WARN")
     
-    try:
-        if "marginSummary" not in data:
-            log(f"❌ [get_account_value] Campo 'marginSummary' ausente. Resposta: {list(data.keys())}", "ERROR")
-            return 0.0
-        
-        margin_summary = data["marginSummary"]
-        
-        # Saldo disponível = accountValue - totalMarginUsed
-        account_value = float(margin_summary.get("accountValue", 0))
-        margin_used = float(margin_summary.get("totalMarginUsed", 0))
-        
-        available = account_value - margin_used
-        
-        log(f"✅ [get_account_value] Account Value: ${account_value:.2f}, Margin Used: ${margin_used:.2f}, Available: ${available:.2f}", "DEBUG")
-        
-        return max(available, 0.0)  # Garantir que não seja negativo
-    except Exception as e:
-        log(f"❌ [get_account_value] Erro parseando saldo: {e}", "ERROR")
-        log(f"   Dados recebidos: {data}", "DEBUG")
-        return 0.0
+    # 2. BUSCAR SALDO EM SPOT
+    spot_data = _http_post_json(_HL_INFO_URL, {"type": "spotClearinghouseState", "user": wallet})
+    spot_available = 0.0
+    
+    if spot_data:
+        try:
+            # Em spot, somar todos os balances livres (total - hold)
+            balances = spot_data.get("balances", [])
+            spot_total = 0
+            spot_hold = 0
+            
+            for balance in balances:
+                coin = balance.get("coin", "")
+                # Apenas USDC conta como saldo (outros tokens não são margem)
+                if coin == "USDC":
+                    total = float(balance.get("total", 0))
+                    hold = float(balance.get("hold", 0))
+                    spot_total = total
+                    spot_hold = hold
+                    spot_available = total - hold
+                    break
+            
+            log(f"💵 [SPOT] Total: ${spot_total:.2f}, Hold: ${spot_hold:.2f}, Livre: ${spot_available:.2f}", "DEBUG")
+        except Exception as e:
+            log(f"⚠️ [get_account_value] Erro parseando saldo SPOT: {e}", "WARN")
+    
+    # 3. SOMAR AMBOS
+    total_available = perp_available + spot_available
+    log(f"✅ [get_account_value] TOTAL DISPONÍVEL: ${total_available:.2f} (Perps: ${perp_available:.2f} + Spot: ${spot_available:.2f})", "INFO")
+    
+    return max(total_available, 0.0)
 
 def _hl_get_latest_fill(wallet: str, symbol: str = None):
     """Busca último preenchimento (fill) de ordem via API Hyperliquid"""
