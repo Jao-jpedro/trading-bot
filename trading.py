@@ -31,11 +31,11 @@ _HL_INFO_URL = "https://api.hyperliquid.xyz/info"
 _HTTP_TIMEOUT = 10
 _SESSION = requests.Session()
 
-# Sistema de rate limiting
-_RATE_LIMIT_DELAY = 0.5  # 500ms entre requisições
+# Sistema de rate limiting - AJUSTADO PARA EVITAR 429
+_RATE_LIMIT_DELAY = 2.0  # 2 SEGUNDOS entre requisições (era 0.5s)
 _LAST_REQUEST_TIME = 0
-_MAX_RETRIES = 3
-_RETRY_BACKOFF = [2, 5, 10]  # Segundos de espera entre retries
+_MAX_RETRIES = 2  # Reduzido de 3 para 2 retries
+_RETRY_BACKOFF = [5, 15]  # Aumentado: 5s, 15s (era 2s, 5s, 10s)
 
 def _http_post_json(url: str, payload: dict, timeout: int = _HTTP_TIMEOUT, retry_count: int = 0):
     """Helper para fazer requisições POST JSON com rate limiting e retry"""
@@ -1515,24 +1515,24 @@ class ExchangeConnector:
             coin = symbol.split('/')[0]
             cache_key = f"price_{symbol}"
             
-            # Verificar cache (válido por 30 segundos para preços)
+            # Verificar cache (válido por 5 MINUTOS para preços - aumentado para evitar 429)
             if cache_key in self._cache:
                 cached_price, cached_time = self._cache[cache_key]
                 age = time.time() - cached_time
                 
-                if age < 30:  # Cache de 30 segundos para preços
+                if age < 300:  # Cache de 5 MINUTOS para preços (era 30s)
                     log(f"💰 Preço {coin} em cache: ${cached_price:.4f} ({age:.1f}s atrás)", "DEBUG")
                     return cached_price
             
             # Sistema de Retry com Exponential Backoff
-            max_retries = 3
+            max_retries = 2  # Reduzido de 3 para 2
             price = None
             
             for attempt in range(1, max_retries + 1):
                 try:
-                    # Adicionar delay antes de buscar preço
+                    # Adicionar delay MAIOR antes de buscar preço
                     if attempt == 1:
-                        time.sleep(0.5)  # 500ms entre requisições
+                        time.sleep(2.0)  # 2 SEGUNDOS entre requisições (era 0.5s)
                     
                     # Buscar direto da Hyperliquid
                     ticker = self.hyperliquid.fetch_ticker(symbol)
@@ -1545,7 +1545,7 @@ class ExchangeConnector:
                     
                 except ccxt.RateLimitExceeded as e:
                     if attempt < max_retries:
-                        wait_time = 2 * attempt  # Exponential: 2s, 4s, 6s
+                        wait_time = 5 * attempt  # Backoff MAIOR: 5s, 10s (era 2s, 4s, 6s)
                         log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
                         time.sleep(wait_time)
                     else:
@@ -1556,7 +1556,7 @@ class ExchangeConnector:
                     # Verificar se é 429 na mensagem de erro
                     if "429" in str(e):
                         if attempt < max_retries:
-                            wait_time = 2 * attempt
+                            wait_time = 5 * attempt  # Backoff MAIOR: 5s, 10s
                             log(f"[WARN] Rate limit atingido (429), aguardando {wait_time}s antes de retry {attempt}/{max_retries}...", "WARN")
                             time.sleep(wait_time)
                         else:
@@ -2760,6 +2760,14 @@ def main():
     log("🚀 INICIANDO SISTEMA DE TRADING - EMA 200 + RSI", "INFO")
     log("=" * 80, "INFO")
     
+    log("⚠️⚠️⚠️ ATENÇÃO: MUDANÇAS PARA EVITAR RATE LIMIT 429 ⚠️⚠️⚠️", "WARN")
+    log("   - Intervalo entre ciclos: 5min → 15min", "WARN")
+    log("   - Delay entre requisições: 0.5s → 2s", "WARN")
+    log("   - Cache de preços: 30s → 5min", "WARN")
+    log("   - Retries: 3 → 2 tentativas", "WARN")
+    log("   - Backoff: [2s,5s,10s] → [5s,15s]", "WARN")
+    log("=" * 80, "INFO")
+    
     # Carregar variáveis de ambiente
     try:
         from dotenv import load_dotenv
@@ -2795,11 +2803,11 @@ def main():
     # Loop principal
     log("🔁 Entrando no loop principal (Ctrl+C para parar)", "INFO")
     
-    # Intervalo de verificação: 5 minutos (reduzido de 3 para evitar rate limit)
-    check_interval = 300  # 5 minutos em segundos
+    # Intervalo de verificação: 15 minutos (aumentado de 5 para evitar rate limit 429)
+    check_interval = 900  # 15 minutos em segundos
     
     log(f"⏰ Intervalo entre ciclos: {check_interval/60:.0f} minutos", "INFO")
-    log(f"ℹ️  Aumentado para 5 min para evitar rate limiting da API", "INFO")
+    log(f"ℹ️  Aumentado para 15 min para evitar rate limiting da API (429 Too Many Requests)", "INFO")
     
     try:
         while True:
