@@ -1722,9 +1722,42 @@ class ExchangeConnector:
             return True
             
         except Exception as e:
+            # Erros específicos do exchange
+            err_msg = str(e)
             log(f"❌ ERRO CRÍTICO AO CRIAR ORDEM!", "ERROR")
             log(f"   Exception: {type(e).__name__}", "ERROR")
-            log(f"   Message: {str(e)}", "ERROR")
+            log(f"   Message: {err_msg}", "ERROR")
+
+            # Caso comum no Hyperliquid: tentativa de 'reduceOnly' que aumentaria a posição
+            # Mensagem: 'Reduce only order would increase position. asset=5'
+            if isinstance(e, Exception) and 'Reduce only order would increase position' in err_msg:
+                log("⚠️ Ordem reduceOnly rejeitada porque aumentaria posição - provavelmente a posição já foi fechada no exchange", "WARN")
+                # Sincronizar estado local: buscar estado do usuário e atualizar
+                try:
+                    user_state = _http_post_json(_HL_INFO_URL, {"type": "clearinghouseState", "user": os.getenv('HYPERLIQUID_SUBACCOUNT')})
+                    if user_state and isinstance(user_state, dict):
+                        # Se não houver assetPositions para o símbolo, assumir que posição foi fechada
+                        asset_positions = user_state.get('assetPositions', [])
+                        found = False
+                        for pos in asset_positions:
+                            p = pos.get('position', {})
+                            if p.get('coin') == coin:
+                                found = True
+                                break
+                        if not found:
+                            log(f"🔁 Estado local sincronizado: posição de {coin} não encontrada no exchange. Marcando como fechada.", "INFO")
+                            # Atualizar StateManager se disponível
+                            try:
+                                self.state.state['active_targets'] = {}
+                                self.state.state['position_entries'] = []
+                                self.state.save_state()
+                            except Exception:
+                                pass
+                            return True
+                except Exception as se:
+                    log(f"⚠️ Falha ao sincronizar estado após erro reduceOnly: {se}", "WARN")
+
+            # Caso padrão: log detalhado e retornar False
             import traceback
             log(f"   Traceback: {traceback.format_exc()}", "ERROR")
             return False
