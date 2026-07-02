@@ -2442,7 +2442,11 @@ class TradingStrategy:
                     # Vender 50% da posição
                     amount_to_sell = amount_remaining * 0.5
                     exit_side = "sell" if signal == "LONG" else "buy"
-                    amount_usd = amount_to_sell * current_price
+                    
+                    # CORREÇÃO CRÍTICA: Para TP1, precisamos fechar 50% da POSIÇÃO, não 50% do capital
+                    # amount_usd deve ser: (quantidade_moedas * preço_atual) / leverage
+                    # Porque create_market_order multiplica por leverage internamente
+                    amount_usd = (amount_to_sell * current_price) / self.cfg.LEVERAGE
                     
                     # VERIFICAÇÃO CRÍTICA: Checar posição real no exchange antes de fechar
                     log(f"", "INFO")
@@ -2616,7 +2620,11 @@ class TradingStrategy:
                 
                 # Vender a quantidade restante (100%)
                 exit_side = "sell" if signal == "LONG" else "buy"
-                amount_usd = amount_remaining * current_price
+                
+                # CORREÇÃO CRÍTICA: Para TP2/SL, precisamos fechar 100% da POSIÇÃO restante
+                # amount_usd deve ser: (quantidade_moedas * preço_atual) / leverage
+                # Porque create_market_order multiplica por leverage internamente
+                amount_usd = (amount_remaining * current_price) / self.cfg.LEVERAGE
                 
                 # VERIFICAÇÃO CRÍTICA: Checar posição real no exchange antes de fechar
                 log(f"", "INFO")
