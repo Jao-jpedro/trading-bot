@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 
 """
-Sistema de Trading com RSI - Long e Short
-Estratégia: Baseada apenas em RSI
-- LONG quando RSI < 20 (sobrevendido)
-- SHORT quando RSI > 80 (sobrecomprado)
+Sistema de Trading com Volume Ratio + Histerese - Long e Short
+Estratégia: Baseada em análise de fluxo de volume com filtro de tendência
+- Calcula Buy/Sell Volume Ratio para cada vela
+- Aplica suavização (média móvel de 3 períodos)
+- LONG quando ratio cruza acima de 1.10 E EMA 7 > EMA 21 (tendência de alta)
+- SHORT quando ratio cruza abaixo de 0.90 E EMA 7 < EMA 21 (tendência de baixa)
+- Histerese evita entradas prematuras e falsos positivos
 """
 
 import os
@@ -565,15 +568,16 @@ class TradingConfig:
     LEVERAGE: int = 5
     
     # Dados históricos
-    HISTORICAL_DAYS: int = 30       # Últimos 30 dias para RSI
+    HISTORICAL_DAYS: int = 30       # Últimos 30 dias para análise
     TIMEFRAME: str = "1h"           # Gráfico de 1 hora
     
-    # Indicadores
-    RSI_PERIOD: int = 14             # Período do RSI
+    # ===== INDICADORES - VOLUME RATIO + EMAs =====
+    EMA_FAST_PERIOD: int = 7         # EMA rápida (7 períodos)
+    EMA_SLOW_PERIOD: int = 21        # EMA lenta (21 períodos)
     
-    # Sinais de entrada
-    RSI_LONG_THRESHOLD: float = 20   # RSI < 20 para LONG (sobrevendido)
-    RSI_SHORT_THRESHOLD: float = 80  # RSI > 80 para SHORT (sobrecomprado)
+    # Sinais de entrada - HISTERESE (Buy/Sell Volume Ratio)
+    RATIO_THRESHOLD_LONG: float = 1.10   # Ratio precisa subir a 1.10 para LONG
+    RATIO_THRESHOLD_SHORT: float = 0.90  # Ratio precisa cair a 0.90 para SHORT
     
     # Estratégia de entrada
     ENTRY_CAPITAL_PCT: float = 25.0   # Usa 25% do capital por entrada (conservador)
@@ -582,12 +586,6 @@ class TradingConfig:
     # Estratégia de SAÍDA - OTIMIZADA
     ATR_PERIOD: int = 14                 # Período para calcular ATR
     ATR_SL_MULTIPLIER: float = 1.5       # Stop Loss = 1.5x ATR (adaptativo)
-    
-    # FILTRO DE REGIME DE MERCADO (Tendência vs Lateralidade)
-    EMA_NEUTRAL_ZONE_PCT: float = 1.5    # Zona neutra ao redor da EMA 200 (1.5%)
-    
-    # CONFIRMAÇÃO POR VOLUME
-    MIN_VOLUME_RATIO: float = 1.2        # Volume deve ser > 1.2x a média para validar sinal
     
     # TAKE PROFITS FIXOS (alongados para maior potencial)
     TAKE_PROFIT_1_PCT: float = 15.0      # TP1: 15% fixo (vende 50% da posição)
@@ -959,15 +957,15 @@ class StateManager:
             amount: Quantidade de moedas
             crypto: Criptomoeda (SOL, XRP, etc)
             operation: LONG ou SHORT
-            rsi: Valor RSI
+            rsi: Valor do Volume Ratio (Buy/Sell) - NOTA: nome mantido por compatibilidade
             atr: Average True Range
             stop_loss: Preço do stop loss
             take_profit_1: Preço do take profit parcial
             take_profit_2: Preço do take profit total
             ema_trend: Tendência EMA ("Bullish", "Bearish", "Neutral")
             atr_percentile: Percentil do ATR (0-100)
-            volume_ratio: Ratio volume atual/médio
-            market_regime: Regime de mercado ("TENDÊNCIA ALTA", "TENDÊNCIA BAIXA", "LATERAL (RANGE)")
+            volume_ratio: Volume Ratio (buy/sell) suavizado
+            market_regime: Tendência do mercado ("ALTA", "BAIXA", "NEUTRA")
         """
         now = datetime.now()
         
@@ -980,7 +978,7 @@ class StateManager:
             "timestamp": now.isoformat(),
             "price": price,
             "amount": amount,
-            "rsi": rsi,
+            "rsi": rsi,  # Agora contém Volume Ratio
             "atr": atr,
             "operation": operation,
             "trade_id": trade_id,
@@ -995,7 +993,7 @@ class StateManager:
         log(f"   📅 Data/Hora: {now.strftime('%Y-%m-%d %H:%M:%S')}", "INFO")
         log(f"   💰 Preço: ${price:.4f}", "INFO")
         log(f"   🪙 Quantidade: {amount:.4f} {crypto}", "INFO")
-        log(f"   📊 RSI: {rsi:.2f}" if rsi else "", "INFO")
+        log(f"   📊 Volume Ratio: {rsi:.3f}" if rsi else "", "INFO")
         log(f"   📊 ATR: ${atr:.4f}" if atr and atr > 0 else "", "INFO")
         log(f"   🛑 Stop Loss: ${stop_loss:.4f}" if stop_loss else "", "INFO")
         log(f"   🎯 TP1: ${take_profit_1:.4f}" if take_profit_1 else "", "INFO")
@@ -1913,6 +1911,79 @@ class TradingStrategy:
             log(f"⚠️ Erro calculando EMA: {e}", "WARN")
             return 0.0
     
+    def calculate_buy_sell_volumes(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Calcula a pressão de compra/venda para cada vela baseado na variação de preço
+        
+        Lógica:
+        - Se o preço subiu (close > close_anterior), atribui mais volume à compra
+        - Se o preço caiu (close < close_anterior), atribui mais volume à venda
+        - A proporção é baseada no % de variação
+        
+        Args:
+            df: DataFrame com colunas 'close' e 'volume'
+        
+        Returns:
+            DataFrame com novas colunas: 'buy_volume', 'sell_volume', 'ratio'
+        """
+        try:
+            if len(df) < 2:
+                log("⚠️ Dados insuficientes para calcular volume ratio", "WARN")
+                return df
+            
+            # Criar cópia para não modificar original
+            df = df.copy()
+            
+            # Calcular variação de preço
+            df['price_change'] = df['close'].diff()
+            df['price_change_pct'] = df['price_change'] / df['close'].shift(1)
+            
+            # Inicializar colunas de volume
+            df['buy_volume'] = 0.0
+            df['sell_volume'] = 0.0
+            
+            # Para cada vela, distribuir volume baseado na direção do preço
+            for idx in range(1, len(df)):
+                total_volume = df.iloc[idx]['volume']
+                price_change = df.iloc[idx]['price_change']
+                
+                if price_change > 0:
+                    # Preço subiu - atribuir mais volume à compra
+                    # Proporção: quanto maior a alta, mais volume de compra
+                    # Usar 60%-90% para compra baseado na intensidade
+                    price_change_pct_abs = abs(df.iloc[idx]['price_change_pct'])
+                    buy_pct = min(0.9, 0.6 + (price_change_pct_abs * 10))  # 60% a 90%
+                    
+                    df.loc[df.index[idx], 'buy_volume'] = total_volume * buy_pct
+                    df.loc[df.index[idx], 'sell_volume'] = total_volume * (1 - buy_pct)
+                    
+                elif price_change < 0:
+                    # Preço caiu - atribuir mais volume à venda
+                    price_change_pct_abs = abs(df.iloc[idx]['price_change_pct'])
+                    sell_pct = min(0.9, 0.6 + (price_change_pct_abs * 10))  # 60% a 90%
+                    
+                    df.loc[df.index[idx], 'sell_volume'] = total_volume * sell_pct
+                    df.loc[df.index[idx], 'buy_volume'] = total_volume * (1 - sell_pct)
+                    
+                else:
+                    # Preço não mudou - distribuir igualmente
+                    df.loc[df.index[idx], 'buy_volume'] = total_volume * 0.5
+                    df.loc[df.index[idx], 'sell_volume'] = total_volume * 0.5
+            
+            # Calcular ratio (buy_volume / sell_volume)
+            df['ratio'] = df['buy_volume'] / df['sell_volume'].replace(0, 1)  # Evitar divisão por zero
+            
+            # Calcular ratio suavizado (média móvel de 3 períodos)
+            df['ratio_3'] = df['ratio'].rolling(window=3, min_periods=1).mean()
+            
+            return df
+            
+        except Exception as e:
+            log(f"⚠️ Erro calculando buy/sell volumes: {e}", "WARN")
+            import traceback
+            log(traceback.format_exc(), "DEBUG")
+            return df
+    
     def analyze_asset(self, symbol: str) -> Dict[str, Any]:
         """Analisa um asset específico e determina se deve entrar LONG ou SHORT
         
@@ -2086,18 +2157,16 @@ class TradingStrategy:
             return False
         
         signal = analysis["signal"]
-        rsi = analysis["rsi"]
-        market_regime = analysis.get("market_regime", "DESCONHECIDO")
-        ema_200 = analysis.get("ema_200")
-        volume_ratio = analysis.get("volume_ratio")
+        ratio_current = analysis.get("ratio_current")
+        ema_fast = analysis.get("ema_fast")
+        ema_slow = analysis.get("ema_slow")
+        trend = analysis.get("trend", "DESCONHECIDA")
         
         log(f"🚨 SINAL DE ENTRADA {signal}: {analysis['coin']}", "INFO")
-        log(f"   RSI: {rsi:.1f}", "INFO")
-        log(f"   Regime: {market_regime}", "INFO")
-        if ema_200:
-            log(f"   EMA 200: ${ema_200:.4f}", "INFO")
-        if volume_ratio:
-            log(f"   Volume Ratio: {volume_ratio:.2f}x", "INFO")
+        log(f"   📊 Volume Ratio: {ratio_current:.3f}", "INFO")
+        log(f"   📈 Tendência: {trend}", "INFO")
+        if ema_fast:
+            log(f"   EMA7: ${ema_fast:.4f} | EMA21: ${ema_slow:.4f}", "INFO")
         return True
     
     def execute_entry(self, analysis: Dict) -> bool:
@@ -2107,7 +2176,10 @@ class TradingStrategy:
         signal = analysis["signal"]
         symbol = analysis["symbol"]
         coin = analysis["coin"]
-        rsi = analysis["rsi"]
+        ratio_current = analysis.get("ratio_current", 0)
+        ema_fast = analysis.get("ema_fast", 0)
+        ema_slow = analysis.get("ema_slow", 0)
+        trend = analysis.get("trend", "DESCONHECIDA")
         data = analysis.get("data")  # DataFrame com dados históricos para ATR
         
         # Calcular quanto investir
@@ -2129,7 +2201,7 @@ class TradingStrategy:
         log(f"   📊 Investindo: ${amount_usd:.2f}", "INFO")
         log(f"   🔧 Leverage {self.cfg.LEVERAGE}x → Valor nocional: ${notional_value:.2f}", "INFO")
         log(f"   🪙 Quantidade: {amount_coins:.4f} {coin} @ ${current_price:.4f}", "INFO")
-        log(f"   📈 RSI: {rsi:.2f}", "INFO")
+        log(f"   � Volume Ratio: {ratio_current:.3f} | Tendência: {trend}", "INFO")
         
         # Calcular ATR ANTES da entrada (para passar ao record_buy)
         atr = 0.0
@@ -2146,25 +2218,16 @@ class TradingStrategy:
                     atr_rank = (atr_series < atr).sum()
                     atr_percentile = (atr_rank / len(atr_series)) * 100
         
-        # Calcular volume ratio
-        volume_ratio = None
-        if data is not None and not data.empty and 'volume' in data.columns:
-            current_volume = data['volume'].iloc[-1]
-            avg_volume = data['volume'].rolling(window=20).mean().iloc[-1]
-            if avg_volume > 0:
-                volume_ratio = current_volume / avg_volume
+        # Calcular volume ratio já está no analysis, mas vamos garantir
+        volume_ratio = ratio_current  # Usar o ratio já calculado
         
-        # Detectar tendência EMA
-        ema_trend = "Neutral"
-        if data is not None and not data.empty:
-            try:
-                ema_200 = data['close'].ewm(span=200, adjust=False).mean().iloc[-1]
-                if current_price > ema_200 * 1.02:
-                    ema_trend = "Bullish"
-                elif current_price < ema_200 * 0.98:
-                    ema_trend = "Bearish"
-            except:
-                pass
+        # Detectar tendência EMA - já calculamos ema_fast e ema_slow
+        if ema_fast > ema_slow:
+            ema_trend = "Bullish"
+        elif ema_fast < ema_slow:
+            ema_trend = "Bearish"
+        else:
+            ema_trend = "Neutral"
         
         # Executar ordem MARKET
         success = self.exchange.create_market_order(symbol, side, amount_usd, self.cfg.LEVERAGE)
@@ -2219,15 +2282,14 @@ class TradingStrategy:
             
             log(f"✅ Take Profits com ALAVANCAGEM {self.cfg.LEVERAGE}x: TP1={tp1_price_move*100:.1f}% preço ({self.cfg.TAKE_PROFIT_1_PCT}% capital), TP2={tp2_price_move*100:.1f}% preço ({self.cfg.TAKE_PROFIT_2_PCT}% capital)", "INFO")
             
-            # Registrar entrada com TODOS os dados (incluindo market_regime)
-            market_regime = analysis.get("market_regime", "DESCONHECIDO")
+            # Registrar entrada com TODOS os dados (agora usando ratio ao invés de RSI)
             
             trade_id = self.state.record_buy(
                 price=current_price,
                 amount=amount_coins,
                 crypto=coin,
                 operation=signal,
-                rsi=rsi,
+                rsi=ratio_current,  # Agora gravamos o RATIO ao invés do RSI
                 atr=atr,
                 stop_loss=stop_loss_price,
                 take_profit_1=take_profit_1_price,
@@ -2235,14 +2297,14 @@ class TradingStrategy:
                 ema_trend=ema_trend,
                 atr_percentile=atr_percentile,
                 volume_ratio=volume_ratio,
-                market_regime=market_regime
+                market_regime=trend  # Agora gravamos a tendência (ALTA/BAIXA/NEUTRA)
             )
             
             log(f"", "INFO")
             log(f"🎯 ALVOS DEFINIDOS (monitoramento automático):", "INFO")
             log(f"   🔴 Stop Loss: ${stop_loss_price:.4f} (-{stop_loss_roi:.0f}% ROI)", "INFO")
-            log(f"   � Take Profit 1: ${take_profit_1_price:.4f} (+{take_profit_1_roi:.0f}% ROI) - 50% posição", "INFO")
-            log(f"   �🟢 Take Profit 2: ${take_profit_2_price:.4f} (+{take_profit_2_roi:.0f}% ROI) - 50% posição", "INFO")
+            log(f"   🟡 Take Profit 1: ${take_profit_1_price:.4f} (+{take_profit_1_roi:.0f}% ROI) - 50% posição", "INFO")
+            log(f"   🟢 Take Profit 2: ${take_profit_2_price:.4f} (+{take_profit_2_roi:.0f}% ROI) - 50% posição", "INFO")
             
             # Salvar alvos no estado para monitoramento (incluindo controle de TP1)
             self.state.state["active_targets"] = {
@@ -2256,7 +2318,7 @@ class TradingStrategy:
                 "amount": amount_coins,
                 "amount_remaining": amount_coins,  # NOVO: rastrear quantidade restante
                 "signal": signal,
-                "entry_rsi": rsi,
+                "entry_ratio": ratio_current,  # Agora gravamos RATIO ao invés de RSI
                 "entry_atr": atr,
                 "trade_id": trade_id,
                 "entry_time": datetime.now().isoformat(),
@@ -2269,15 +2331,16 @@ class TradingStrategy:
             discord.send(
                 f"{'🟢' if signal == 'LONG' else '🔴'} ENTRADA {signal} - {coin}",
                 f"**Preço:** ${current_price:.4f}\n"
-                f"**RSI:** {rsi:.2f}\n"
-                f"**ATR:** ${atr:.4f} ({atr_percentile:.0f}º percentil)" if atr > 0 and atr_percentile else f"**RSI:** {rsi:.2f}\n" +
+                f"**Volume Ratio:** {ratio_current:.3f}\n"
+                f"**Tendência:** {trend} (EMA7={ema_fast:.4f} vs EMA21={ema_slow:.4f})\n"
+                f"**ATR:** ${atr:.4f} ({atr_percentile:.0f}º percentil)\n" if atr > 0 and atr_percentile else f"**Volume Ratio:** {ratio_current:.3f}\n**Tendência:** {trend}\n" +
                 f"**Capital usado:** ${amount_usd:.2f} ({self.cfg.ENTRY_CAPITAL_PCT}% do saldo)\n"
                 f"**Leverage:** {self.cfg.LEVERAGE}x\n"
                 f"**Valor nocional:** ${notional_value:.2f}\n"
                 f"**Quantidade:** {amount_coins:.4f} {coin}\n\n"
                 f"**Alvos automáticos:**\n"
                 f"🔴 Stop Loss: ${stop_loss_price:.4f} ({-stop_loss_roi:+.0f}% ROI)\n"
-                f"� TP1 (50%): ${take_profit_1_price:.4f} ({take_profit_1_roi:+.0f}% ROI)\n"
+                f"🟡 TP1 (50%): ${take_profit_1_price:.4f} ({take_profit_1_roi:+.0f}% ROI)\n"
                 f"🟢 TP2 (50%): ${take_profit_2_price:.4f} ({take_profit_2_roi:+.0f}% ROI)",
                 0x00ff00 if signal == "LONG" else 0xff0000
             )

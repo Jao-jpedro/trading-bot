@@ -1,0 +1,177 @@
+            # Calcular ROI atual
+            if signal == "LONG":
+                price_change_pct = ((current_price - entry_price) / entry_price) * 100
+            else:  # SHORT
+                price_change_pct = ((entry_price - current_price) / entry_price) * 100
+            
+            roi_current = price_change_pct * self.cfg.LEVERAGE
+            
+            # ============================================================
+            # LÓGICA DE TP1 (10% - vende 50% da posição)
+            # ============================================================
+            if not tp1_hit:
+                hit_tp1 = False
+                if signal == "LONG":
+                    if current_price >= take_profit_1_price:
+                        hit_tp1 = True
+                else:  # SHORT
+                    if current_price <= take_profit_1_price:
+                        hit_tp1 = True
+                
+                if hit_tp1:
+                    log(f"🎯 TP1 (10%) atingido para {coin}!", "INFO")
+                    log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
+                    log(f"   💰 Preço TP1: ${current_price:.4f}", "INFO")
+                    log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
+                    
+                    # Vender 50% da posição
+                    amount_to_sell = amount_remaining * 0.5
+                    exit_side = "sell" if signal == "LONG" else "buy"
+                    amount_usd = amount_to_sell * current_price
+                    
+                    success = self.exchange.create_market_order(
+                        symbol,
+                        exit_side,
+                        amount_usd,
+                        self.cfg.LEVERAGE
+                    )
+                    
+                    if success:
+                        # Registrar venda parcial no Google Sheets
+                        self.state.record_sell(
+                            current_price,
+                            amount_to_sell,
+                            coin,
+                            signal,
+                            rsi=None,
+                            reason="Take Profit 1 (50%)",
+                            trade_id=trade_id
+                        )
+                        
+                        # Notificar Discord
+                        discord.send(
+                            f"🎯 TP1 EXECUTADO - {coin}",
+                            f"**Preço de entrada:** ${entry_price:.4f}\n"
+                            f"**Preço TP1:** ${current_price:.4f}\n"
+                            f"**Quantidade vendida:** {amount_to_sell:.4f} {coin} (50%)\n"
+                            f"**Quantidade restante:** {amount_remaining - amount_to_sell:.4f} {coin}\n"
+                            f"**Operação:** {signal}\n"
+                            f"**ROI:** {roi_current:+.2f}%\n"
+                            f"**Trade ID:** {trade_id}",
+                            0x00ff00
+                        )
+                        
+                        # Atualizar estado: marcar TP1 como executado
+                        self.state.state["active_targets"]["tp1_hit"] = True
+                        self.state.state["active_targets"]["amount_remaining"] = amount_remaining - amount_to_sell
+                        
+                        # MOVER STOP LOSS PARA BREAKEVEN
+                        if self.cfg.MOVE_SL_TO_BREAKEVEN:
+                            old_sl = stop_loss_price
+                            self.state.state["active_targets"]["stop_loss_price"] = entry_price
+                            self.state.state["active_targets"]["breakeven_set"] = True
+                            self.state.save_state()
+                            
+                            log(f"🔒 Stop Loss movido para BREAKEVEN: ${old_sl:.4f} → ${entry_price:.4f}", "INFO")
+                            discord.send(
+                                f"🔒 STOP LOSS MOVIDO PARA BREAKEVEN - {coin}",
+                                f"**Stop Loss anterior:** ${old_sl:.4f}\n"
+                                f"**Novo Stop Loss (breakeven):** ${entry_price:.4f}\n"
+                                f"**Trade ID:** {trade_id}",
+                                0xffff00
+                            )
+                        else:
+                            self.state.save_state()
+                        
+                        log(f"✅ TP1 executado! 50% vendido, SL movido para breakeven", "INFO")
+                        return  # Sair para evitar checar TP2/SL no mesmo ciclo
+                    else:
+                        log(f"❌ Erro ao executar TP1 para {coin}", "ERROR")
+                        return
+            
+            # ============================================================
+            # LÓGICA DE TP2 (20% - vende 100% da posição total)
+            # ============================================================
+            hit_tp2 = False
+            if signal == "LONG":
+                if current_price >= take_profit_2_price:
+                    hit_tp2 = True
+            else:  # SHORT
+                if current_price <= take_profit_2_price:
+                    hit_tp2 = True
+            
+            # ============================================================
+            # LÓGICA DE STOP LOSS (agora pode ser breakeven)
+            # ============================================================
+            hit_stop_loss = False
+            if signal == "LONG":
+                if current_price <= stop_loss_price:
+                    hit_stop_loss = True
+            else:  # SHORT
+                if current_price >= stop_loss_price:
+                    hit_stop_loss = True
+            
+            # Executar saída total (TP2 ou SL)
+            if hit_stop_loss or hit_tp2:
+                exit_type = "Stop Loss" if hit_stop_loss else "Take Profit 2"
+                emoji = "🔴" if hit_stop_loss else "🟢"
+                
+                # Se SL e breakeven_set=True, foi saída no breakeven (sem perda nem ganho)
+                if hit_stop_loss and breakeven_set:
+                    exit_type = "Breakeven (Stop Loss)"
+                    emoji = "🟡"
+                
+                log(f"{emoji} {exit_type} atingido para {coin}!", "INFO")
+                log(f"   📊 Preço entrada: ${entry_price:.4f}", "INFO")
+                log(f"   💰 Preço saída: ${current_price:.4f}", "INFO")
+                log(f"   📊 ROI: {roi_current:+.2f}%", "INFO")
+                
+                # Vender a quantidade restante (100% no caso do TP2)
+                exit_side = "sell" if signal == "LONG" else "buy"
+                amount_usd = amount_remaining * current_price
+                
+                success = self.exchange.create_market_order(
+                    symbol,
+                    exit_side,
+                    amount_usd,
+                    self.cfg.LEVERAGE
+                )
+                
+                if success:
+                    # Registrar venda final no Google Sheets
+                    reason = exit_type
+                    self.state.record_sell(
+                        current_price,
+                        amount_remaining,
+                        coin,
+                        signal,
+                        rsi=None,
+                        reason=reason,
+                        trade_id=trade_id
+                    )
+                    
+                    # Notificar Discord
+                    discord.send(
+                        f"{emoji} {exit_type.upper()} EXECUTADO - {coin}",
+                        f"**Preço de entrada:** ${entry_price:.4f}\n"
+                        f"**Preço de saída:** ${current_price:.4f}\n"
+                        f"**Quantidade vendida:** {amount_remaining:.4f} {coin}\n"
+                        f"**Operação:** {signal}\n"
+                        f"**ROI:** {roi_current:+.2f}%\n"
+                        f"**Trade ID:** {trade_id}",
+                        0xff0000 if hit_stop_loss else 0x00ff00
+                    )
+                    
+                    # Limpar estado (trade finalizado)
+                    self.state.state["active_targets"] = {}
+                    self.state.state["position_entries"] = []
+                    self.state.save_state()
+                    
+                    log(f"✅ Posição {coin} fechada completamente!", "INFO")
+                else:
+                    log(f"❌ Erro ao executar ordem de saída para {coin}", "ERROR")
+            else:
+                # Log de monitoramento
+                log(f"👀 Monitorando {coin}: ${current_price:.4f} | ROI {roi_current:+.2f}% | "
+                    f"SL ${stop_loss_price:.4f} | TP1 ${take_profit_1_price:.4f} | TP2 ${take_profit_2_price:.4f} | "
+                    f"TP1_hit={tp1_hit} | Restante={amount_remaining:.4f}", "DEBUG")
