@@ -2861,7 +2861,7 @@ def main():
     setup_log_file()
     
     log("=" * 80, "INFO")
-    log("🚀 INICIANDO SISTEMA DE TRADING - EMA 200 + RSI", "INFO")
+    log("🚀 INICIANDO SISTEMA DE TRADING - VOLUME RATIO + HISTERESE", "INFO")
     log("=" * 80, "INFO")
     
     log("⚠️⚠️⚠️ ATENÇÃO: MUDANÇAS PARA EVITAR RATE LIMIT 429 ⚠️⚠️⚠️", "WARN")
@@ -2891,9 +2891,10 @@ def main():
     log(f"⚙️  Configuração:", "INFO")
     log(f"   Assets: {', '.join([s.split('/')[0] for s in cfg.SYMBOLS])} ({cfg.LEVERAGE}x leverage)", "INFO")
     log(f"   Timeframe: {cfg.TIMEFRAME}", "INFO")
-    log(f"   RSI: {cfg.RSI_PERIOD} períodos", "INFO")
-    log(f"   Entrada LONG: RSI < {cfg.RSI_LONG_THRESHOLD} (sobrevendido)", "INFO")
-    log(f"   Entrada SHORT: RSI > {cfg.RSI_SHORT_THRESHOLD} (sobrecomprado)", "INFO")
+    log(f"   📊 Volume Ratio - Thresholds de Histerese:", "INFO")
+    log(f"   Entrada LONG: Ratio cruza {cfg.RATIO_THRESHOLD_LONG:.2f} para cima + EMA7 > EMA21", "INFO")
+    log(f"   Entrada SHORT: Ratio cruza {cfg.RATIO_THRESHOLD_SHORT:.2f} para baixo + EMA7 < EMA21", "INFO")
+    log(f"   EMAs: Rápida={cfg.EMA_FAST_PERIOD} | Lenta={cfg.EMA_SLOW_PERIOD}", "INFO")
     log(f"   Capital por entrada: {cfg.ENTRY_CAPITAL_PCT}%", "INFO")
     log(f"   Cooldown entrada: {cfg.ENTRY_COOLDOWN_HOURS}h (2 dias)", "INFO")
     log(f"   Stop Loss: ATR dinâmico (1.5x) ou {cfg.STOP_LOSS_PRICE_PCT:.1f}% fixo", "INFO")
