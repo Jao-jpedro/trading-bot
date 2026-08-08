@@ -1987,11 +1987,11 @@ class TradingStrategy:
     def analyze_asset(self, symbol: str) -> Dict[str, Any]:
         """Analisa um asset específico e determina se deve entrar LONG ou SHORT
         
-        NOVA LÓGICA:
-        1. Calcula EMA 200 e Zona Neutra (±1.5%)
-        2. Determina Regime de Mercado (Tendência Alta, Baixa ou Lateral)
-        3. Aplica regras de validação RSI + EMA
-        4. Valida volume (deve ser > 1.2x média)
+        NOVA LÓGICA - VOLUME RATIO + HISTERESE:
+        1. Calcula Buy/Sell Volume Ratio suavizado (MA 3 períodos)
+        2. Detecta cruzamentos com Histerese (1.10 LONG / 0.90 SHORT)
+        3. Filtra por Tendência (EMA 7 vs EMA 21)
+        4. Gera sinal apenas em cruzamentos confirmados
         """
         # Buscar dados históricos
         df = self.exchange.fetch_historical_data(symbol, self.cfg.HISTORICAL_DAYS)
@@ -2000,11 +2000,20 @@ class TradingStrategy:
             log(f"❌ Sem dados históricos para {symbol}", "ERROR")
             return {}
         
-        # Calcular indicadores
-        rsi = self.calculate_rsi(df, period=self.cfg.RSI_PERIOD)
+        # Calcular Buy/Sell Volume Ratio
+        df = self.calculate_buy_sell_volumes(df)
         
-        # Calcular EMA 200
-        ema_200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        if df.empty or 'ratio_3' not in df.columns:
+            log(f"❌ Erro ao calcular Volume Ratio para {symbol}", "ERROR")
+            return {}
+        
+        # Ratios atual e anterior (para detectar cruzamento)
+        ratio_current = df['ratio_3'].iloc[-1]
+        ratio_previous = df['ratio_3'].iloc[-2] if len(df) >= 2 else ratio_current
+        
+        # Calcular EMAs 7 e 21
+        ema_fast = self.calculate_ema(df, period=self.cfg.EMA_FAST_PERIOD)
+        ema_slow = self.calculate_ema(df, period=self.cfg.EMA_SLOW_PERIOD)
         
         # Preço atual
         current_price = self.exchange.get_current_price(symbol)
@@ -2013,67 +2022,35 @@ class TradingStrategy:
             log(f"❌ Preço inválido para {symbol}", "ERROR")
             return {}
         
-        # ===== FILTRO DE REGIME DE MERCADO =====
-        # Calcular Zona Neutra ao redor da EMA 200
-        ema_200_upper = ema_200 * (1 + (self.cfg.EMA_NEUTRAL_ZONE_PCT / 100))
-        ema_200_lower = ema_200 * (1 - (self.cfg.EMA_NEUTRAL_ZONE_PCT / 100))
-        
-        # Determinar regime de mercado
-        market_regime = None
-        if current_price > ema_200_upper:
-            market_regime = "TENDÊNCIA ALTA"
-        elif current_price < ema_200_lower:
-            market_regime = "TENDÊNCIA BAIXA"
+        # ===== DETERMINAR TENDÊNCIA =====
+        trend = "DESCONHECIDA"
+        if ema_fast > ema_slow:
+            trend = "ALTA"
+        elif ema_fast < ema_slow:
+            trend = "BAIXA"
         else:
-            market_regime = "LATERAL (RANGE)"
-        
-        # ===== VALIDAÇÃO POR VOLUME =====
-        volume_ratio = None
-        volume_ok = False
-        if 'volume' in df.columns and len(df) > 0:
-            current_volume = df['volume'].iloc[-1]
-            avg_volume = df['volume'].mean()
-            if avg_volume > 0:
-                volume_ratio = current_volume / avg_volume
-                volume_ok = volume_ratio >= self.cfg.MIN_VOLUME_RATIO
+            trend = "LATERAL"
         
         # Posição atual neste asset
         position = self.exchange.get_position(symbol)
         
-        # ===== DETERMINAR SINAL COM NOVAS REGRAS =====
-        signal_rsi = None  # Sinal puro do RSI
-        signal_final = None  # Sinal após filtros
-        regime_block_reason = None  # Motivo de bloqueio (se houver)
+        # ===== DETECTAR CRUZAMENTOS COM HISTERESE =====
+        signal = None
+        cross_reason = None
         
-        # 1. Sinal puro do RSI
-        if rsi < self.cfg.RSI_LONG_THRESHOLD:
-            signal_rsi = "LONG"
-        elif rsi > self.cfg.RSI_SHORT_THRESHOLD:
-            signal_rsi = "SHORT"
+        # LONG: Ratio cruza threshold LONG para CIMA + tendência de alta
+        if (ratio_previous < self.cfg.RATIO_THRESHOLD_LONG and 
+            ratio_current >= self.cfg.RATIO_THRESHOLD_LONG and 
+            trend == "ALTA"):
+            signal = "LONG"
+            cross_reason = f"Ratio cruzou {self.cfg.RATIO_THRESHOLD_LONG:.2f} para cima em tendência de alta"
         
-        # 2. Aplicar filtro de Regime de Mercado + Volume
-        if signal_rsi:
-            # Verificar se o sinal é válido para o regime atual
-            signal_valid_by_regime = False
-            
-            if market_regime == "TENDÊNCIA ALTA":
-                if signal_rsi == "LONG":
-                    signal_valid_by_regime = True
-                else:
-                    regime_block_reason = "SHORT bloqueado em tendência de alta"
-            elif market_regime == "TENDÊNCIA BAIXA":
-                if signal_rsi == "SHORT":
-                    signal_valid_by_regime = True
-                else:
-                    regime_block_reason = "LONG bloqueado em tendência de baixa"
-            else:  # LATERAL
-                signal_valid_by_regime = True  # Aceita ambos sinais em mercado lateral
-            
-            # Validar volume
-            if signal_valid_by_regime and volume_ok:
-                signal_final = signal_rsi
-            elif signal_valid_by_regime and not volume_ok:
-                regime_block_reason = f"Volume insuficiente (ratio={volume_ratio:.2f} < {self.cfg.MIN_VOLUME_RATIO})"
+        # SHORT: Ratio cruza threshold SHORT para BAIXO + tendência de baixa
+        elif (ratio_previous > self.cfg.RATIO_THRESHOLD_SHORT and 
+              ratio_current <= self.cfg.RATIO_THRESHOLD_SHORT and 
+              trend == "BAIXA"):
+            signal = "SHORT"
+            cross_reason = f"Ratio cruzou {self.cfg.RATIO_THRESHOLD_SHORT:.2f} para baixo em tendência de baixa"
         
         coin = symbol.split('/')[0]
         
@@ -2081,34 +2058,29 @@ class TradingStrategy:
             "symbol": symbol,
             "coin": coin,
             "current_price": current_price,
-            "rsi": rsi,
-            "ema_200": ema_200,
-            "ema_200_upper": ema_200_upper,
-            "ema_200_lower": ema_200_lower,
-            "market_regime": market_regime,
-            "volume_ratio": volume_ratio,
-            "volume_ok": volume_ok,
-            "signal_rsi": signal_rsi,
-            "signal": signal_final,
-            "regime_block_reason": regime_block_reason,
+            "ratio_current": ratio_current,
+            "ratio_previous": ratio_previous,
+            "ema_fast": ema_fast,
+            "ema_slow": ema_slow,
+            "trend": trend,
+            "signal": signal,
+            "cross_reason": cross_reason,
             "position": position,
             "has_position": position is not None,
             "data": df,
         }
         
-        # Log da análise com NOVAS MÉTRICAS
+        # Log da análise
         log(f"", "INFO")
-        log(f"📊 {coin}: Preço=${current_price:.4f} | RSI={rsi:.1f} | Regime: {market_regime}", "INFO")
-        log(f"   EMA 200: ${ema_200:.4f} | Zona: [${ema_200_lower:.4f} - ${ema_200_upper:.4f}]", "INFO")
-        if volume_ratio:
-            log(f"   Volume Ratio: {volume_ratio:.2f}x {'✅ OK' if volume_ok else '❌ Baixo'}", "INFO")
+        log(f"📊 {coin}: Preço=${current_price:.4f}", "INFO")
+        log(f"   📈 Tendência: {trend} | EMA7=${ema_fast:.4f} | EMA21=${ema_slow:.4f}", "INFO")
+        log(f"   📊 Volume Ratio (suavizado): {ratio_current:.3f} (anterior: {ratio_previous:.3f})", "INFO")
+        log(f"   🎯 Thresholds: LONG={self.cfg.RATIO_THRESHOLD_LONG:.2f} | SHORT={self.cfg.RATIO_THRESHOLD_SHORT:.2f}", "INFO")
         
-        if signal_rsi and not signal_final:
-            log(f"   🚫 Sinal RSI {signal_rsi} BLOQUEADO: {regime_block_reason}", "WARN")
-        elif signal_final:
-            log(f"   ✅ Sinal VALIDADO: {signal_final}", "INFO")
+        if signal:
+            log(f"   ✅ SINAL {signal}: {cross_reason}", "INFO")
         else:
-            log(f"   Sinal: NENHUM", "INFO")
+            log(f"   ⏸️  Aguardando cruzamento do ratio com histerese", "INFO")
         
         # Se tem posição, calcular % de ganho
         if position:
@@ -2134,11 +2106,12 @@ class TradingStrategy:
             analysis["position_size"] = position_size
             analysis["unrealized_pnl"] = unrealized_pnl
             
-            log(f"   � Posição: {side.upper()} {abs(position_size):.4f} {coin} @ ${entry_price:.4f}", "INFO")
+            log(f"   📍 Posição: {side.upper()} {abs(position_size):.4f} {coin} @ ${entry_price:.4f}", "INFO")
             log(f"   {'📈' if pct_gain_real >= 0 else '📉'} PNL: {pct_gain_real:+.2f}% | ${unrealized_pnl:+.2f}", "INFO")
         
         return analysis
-    
+
+
     def should_enter(self, analysis: Dict) -> bool:
         """Verifica se deve entrar na posição"""
         # Se já tem posição aberta neste asset, não faz nada
